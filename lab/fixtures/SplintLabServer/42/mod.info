@@ -1,0 +1,5 @@
+name=Splint Lab Server (test fixture)
+id=SplintLabServer
+description=Development-only fixture for the Splint headless lab. Never shipped.
+modversion=0.1.0
+versionMin=42.22
