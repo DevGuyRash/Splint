@@ -243,13 +243,12 @@ public final class AnimalOps {
     public static void detach(IsoAnimal a) {
         IsoCell cell = a.getCell();
         if (cell != null) {
-            if (cell.isSafeToAdd()) {
-                cell.getObjectList().remove(a);
-                cell.getRemoveList().remove(a);
-            } else {
-                cell.getRemoveList().add(a);
-            }
+            // Directly, as vanilla IsoAnimal.removeFromWorld does: the cell's deferred remove
+            // list skips every living IsoPlayer, and animals are IsoPlayers, so queueing the
+            // animal there would leave it in the update list forever.
+            cell.getObjectList().remove(a);
             cell.getAddList().remove(a);
+            cell.getRemoveList().remove(a);
         }
         quietly(() -> MovingObjectUpdateScheduler.instance.removeObject(a));
         quietly(() -> { if (a.getHutch() != null) a.getHutch().animalOutside.remove(a); });

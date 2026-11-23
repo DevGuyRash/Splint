@@ -250,15 +250,15 @@ def admin_commands(s: Session) -> dict:
         "local def=HutchDefinitions.hutchs['hutchhen'] local sq=getCell():getGridSquare(px-6,py+6,0) "
         "local h=IsoHutch.new(sq,true,def.baseSprite,def,nil) h:transmitCompleteItemToClients() "
         "local cd=AnimalDefinitions.getDef('chick') local inside=0 "
-        "for i=0,2 do local a=addAnimal(getCell(),px-6,py+6,0,'chick',cd:getRandomBreed()) "
+        "for i=0,2 do local a=addAnimal(getCell(),0,0,0,'chick',cd:getRandomBreed()) "
         "a:getData():setPreferredHutchPosition(i) if h:addAnimalInside(a) then inside=inside+1 end end "
         # livestock trailer with two animals
         "local tsq=getCell():getGridSquare(px+8,py-8,0) local v=addVehicleDebug('Base.Trailer_Livestock',IsoDirections.N,nil,tsq) "
         "local trailer=0 if v then for i=1,2 do local a=addAnimal(getCell(),px+8,py-8,0,'hen',AnimalDefinitions.getDef('hen'):getRandomBreed()) "
         "v:addAnimalInTrailer(a) trailer=trailer+1 end end "
         # one chick carried in the player's inventory
-        "local c=addAnimal(getCell(),px,py,0,'chick',cd:getRandomBreed()) local item=instanceItem('Base.Animal') "
-        "item:setAnimal(c) c:removeFromWorld() c:removeFromSquare() p:getInventory():AddItem(item) "
+        "local c=addAnimal(getCell(),0,0,0,'chick',cd:getRandomBreed()) local item=instanceItem('Base.Animal') "
+        "item:setAnimal(c) p:getInventory():AddItem(item) "
         "return 'inside='..inside..' trailer='..trailer..' vehicle='..(v and v:getId() or -1)..' user='..p:getUsername()")
     out["setup"] = setup
     vid = re.search(r"vehicle=(-?\d+)", setup).group(1)
@@ -266,6 +266,7 @@ def admin_commands(s: Session) -> dict:
     dup = s.lua(f"local t=SplintLabServer.animalsOnSquares({x},{y},0,20) local a,b for _,an in ipairs(t) do "
                 "if an:getAnimalType()=='hen' then if not a then a=an elseif not b then b=an end end end "
                 "b:setAnimalID(a:getAnimalID()) return a:getAnimalID()")
+    dup = dup.split()[-1]
     out["duplicated_id"] = dup
     time.sleep(3)
     r = 40
@@ -305,7 +306,7 @@ def inventory_growth(s: Session) -> dict:
     'ghost chicken in my pocket' theory)."""
     x, y = fresh_spot(s, -120)
     s.lua("local p=SplintLabServer.player() local cd=AnimalDefinitions.getDef('chick') "
-          "local c=addAnimal(getCell(),math.floor(p:getX())+2,math.floor(p:getY()),0,'chick',cd:getRandomBreed()) "
+          "local c=addAnimal(getCell(),math.floor(p:getX())+2,math.floor(p:getY()),0,'chick',cd:getRandomBreed()) c:addToWorld() "
           "local item=instanceItem('Base.Animal') item:setAnimal(c) c:removeFromWorld() c:removeFromSquare() "
           "p:getInventory():AddItem(item) SplintLabServer.pocket=c return c:getAnimalID()")
     before = {"inventory": s.lua(INVENTORY_ANIMALS), "world": census(s, x, y, 20)}
@@ -341,12 +342,12 @@ def hutch_growth(s: Session) -> dict:
     s.lua(f"local def=HutchDefinitions.hutchs['hutchhen'] local sq=getCell():getGridSquare({x}-6,{y}+6,0) "
           "local h=IsoHutch.new(sq,true,def.baseSprite,def,nil) h:transmitCompleteItemToClients() SplintLabServer.hutch=h "
           "local cd=AnimalDefinitions.getDef('chick') "
-          f"for i=0,3 do local a=addAnimal(getCell(),{x}-6,{y}+6,0,'chick',cd:getRandomBreed()) a:getData():setPreferredHutchPosition(i) h:addAnimalInside(a) end "
+          "for i=0,3 do local a=addAnimal(getCell(),0,0,0,'chick',cd:getRandomBreed()) a:getData():setPreferredHutchPosition(i) h:addAnimalInside(a) end "
           "return h:getAnimalInside():size()")
-    listing = ("local h=SplintLabServer.hutch local out={} for _,a in pairs(SplintLabServer.inside()) do "
+    listing = ("local out={} for _,a in ipairs(SplintLabServer.inside()) do "
                "out[#out+1]=tostring(a:getAnimalType())..'#'..a:getAnimalID() end return #out..' '..table.concat(out,',')")
-    s.lua("function SplintLabServer.inside() local t={} local m=SplintLabServer.hutch:getAnimalInside() local it=m:values():iterator() "
-          "while it:hasNext() do t[#t+1]=it:next() end return t end return 1")
+    s.lua("function SplintLabServer.inside() local t={} local h=SplintLabServer.hutch "
+          "for i=0,h:getMaxAnimals()-1 do local a=h:getAnimal(i) if a then t[#t+1]=a end end return t end return 1")
     before = {"hutch": s.lua(listing), "world": census(s, x, y, 25)}
     off = s.log_size()
     s.lua("for _,a in ipairs(SplintLabServer.inside()) do a:setHoursSurvived(400*24) a:getData():setAge(400) end return 1")
@@ -359,8 +360,26 @@ def hutch_growth(s: Session) -> dict:
             "exceptions": exceptions(s.log_since(off)), "lua_alive": heartbeat_alive(s)}
 
 
+def grow_near_invalid_ghost(s: Session) -> dict:
+    """The report's exact stack with a seed Splint cannot prevent: an animal of an undefined
+    type next to juveniles that reach their growth age in the same tick."""
+    x, y = fresh_spot(s, 480)
+    s.server("spawn chick - 12 2 0 1 0")
+    before = census(s, x, y, 12)
+    off = s.log_size()
+    s.lua(f"local d=AnimalDefinitions.getDef('hen') addAnimal(getCell(),{x}+3,{y},0,'splintNoSuchAnimal',d:getRandomBreed()) "
+          + force_growth_code(x, y, 8))
+    time.sleep(20)
+    out = {"before": before, "lua_alive": heartbeat_alive(s), "stats_frozen": stats_frozen(s)}
+    if out["lua_alive"]:
+        out["after"] = census(s, x, y, 12)
+    out["exceptions"] = exceptions(s.log_since(off))
+    return out
+
+
 SCENARIOS = {f.__name__.replace("_", "-"): f for f in
-             (mass_growth, duplicate_ids, invalid_type, water_seed, grow_near_ghost, unload_with_ghost)}
+             (mass_growth, duplicate_ids, invalid_type, water_seed, grow_near_ghost, grow_near_invalid_ghost,
+              unload_with_ghost)}
 # Needs the agent; run with --only admin-commands.
 EXTRA = {"admin-commands": admin_commands}
 # Storage-place growth investigations.
