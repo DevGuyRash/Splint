@@ -98,8 +98,14 @@ function commands.spawn(a)
     if not def then return "unknown type " .. tostring(animalType) end
     local placed, failed = 0, 0
     for _ = 1, count do
-        local x = math.floor(p:getX() + dx + (spread > 0 and ZombRand(-spread, spread + 1) or 0))
-        local y = math.floor(p:getY() + dy + (spread > 0 and ZombRand(-spread, spread + 1) or 0))
+        -- Dry ground only: scenarios that want water place animals there on purpose.
+        local x, y
+        for _ = 1, 20 do
+            x = math.floor(p:getX() + dx + (spread > 0 and ZombRand(-spread, spread + 1) or 0))
+            y = math.floor(p:getY() + dy + (spread > 0 and ZombRand(-spread, spread + 1) or 0))
+            local sq = getCell():getGridSquare(x, y, p:getZ())
+            if sq and not sq:isWaterSquare() then break end
+        end
         local breed = breedName ~= "-" and def:getBreedByName(breedName) or def:getRandomBreed()
         local animal = addAnimal(getCell(), x, y, p:getZ(), animalType, breed)
         if animal and animal:getData() then

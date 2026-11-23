@@ -90,17 +90,21 @@ So a server on "Very Fast" ages every animal 10×, everywhere. Nothing is extra 
 
 When a chunk unloads, its animals join virtual herds in the population worker. `AnimalManagerWorker.addAnimal` (AnimalManagerWorker.java ~197-219) removes any joining animal whose ID already exists in the herd, logging only at debug level ("Trying to add an animal with an existing IsoAnimal.animalID"). Two same-ID animals near each other therefore become one the next time nobody is around. This is a second silent loss path, independent of growth (finding 2).
 
-### 11. How Splint answers each finding
+### 11. A ghost in the population save kills the population worker (reproduced: vanilla `stress-5000` beside water)
+
+When a mass spawn overlapped a river, 303 of the new animals came out half-built (finding 3), and vanilla's world update stopped. Later the animal population worker thread died: `Exception in thread "Thread-0" java.lang.NullPointerException: Cannot invoke "AnimalData.getBreed()" because "this.data" is null` in `IsoAnimal.save`, reached through `VirtualAnimal.save` → `AnimalChunk.save` → `AnimalCell.save` → `AnimalManagerWorker.save`. That is the signature of reference R17 in the incident report, there attributed to a heavily modded single-player save; here it happens unmodded on a dedicated server. With the worker thread gone, the server no longer saves or restores animal populations at all. Splint prevents the ghost (water), and removes ghosts before chunk unload, before virtualisation and before the population save.
+
+### 12. How Splint answers each finding
 
 | Finding | Splint change |
 |---|---|
 | 1 random IDs | `Rand.Next(10000)` in `IsoAnimal.init` is replaced in place by a per-world allocator (unique, monotonic, persisted in blocks). A primitive `int` → weak-reference hash index of live animals answers "who has this ID" in O(1). |
 | 2, 10 duplicate loss | Duplicates are refused in `setAnimalID`, re-assigned when an animal enters the world, and fixed before its chunk unloads. Growth hands the parent's ID to its next stage explicitly; nothing is deleted over an ID. |
-| 3 ghosts | Animals created on water are moved to land. Ghosts found on update, at chunk unload, at save, or beside a growing animal are removed with a removal that cannot throw. The constructor's duplicate check no longer runs before the ID exists. |
+| 3, 11 ghosts | Animals created on water are moved to land. Ghosts found on update, at chunk unload, at save, or beside a growing animal are removed with a removal that cannot throw. The constructor's duplicate check no longer runs before the ID exists. |
 | 4, 5, 6 limbo | The update scheduler's per-object calls (preupdate, frameStep, update, postupdate) are each isolated for every moving object, as are animal sound and hutch updates: a failure is logged with location and players, and the object is frozen with back-off after 3 failures in a row instead of aborting the world update. The lab's damaged-animal case (`malformed-breed`) failed in postupdate, which an update-only guard would have missed. |
 | 7 `remove animals` | `/splint animals kill` with combinable selections (cell, area, player, hutch, trailer, inventory, type, stage, sex, age, place, ghosts, frozen, duplicates), dry run by default. |
 
-### 12. Lab scenarios
+### 13. Lab scenarios
 
 Each scenario runs in a fresh session. Results: `vanilla` without Splint, `splint` with it.
 
