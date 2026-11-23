@@ -18,7 +18,7 @@ The game only runs mod Lua in Kahlua, and these failures are in Java, outside an
 - A module (`splint.<area>`) declares its patches, redirects, commands, counters, status and per-player info. It owns no plumbing. Anything a second module would also need belongs in core.
 - Every patch has a reproduced failure behind it, recorded in `docs/investigation.md` with the lab scenario that shows it. Do not add speculative patches. Fix at the source (a redirect or a replacement of the faulty logic) rather than overwriting results afterwards.
 - Hooks keep the original callable as `splint$<name>` through a per-hook holder class (`Originals`), so one patch that fails to apply cannot break another.
-- Modules are constructed in premain, before the transformer exists: a module's constructor and static fields must not touch game classes (use class names, as `Describers.register` does), or those classes load unpatched. `PatchRegistry` reports any target that loaded too early.
+- Modules are constructed in premain, before the transformer exists. The module class, its constructor and its static fields must not touch game classes. That includes creating objects whose code mentions one: the JVM's verifier loads classes to check assignments, which is how `IsoAnimal` once loaded unpatched. Declare patches as strings; do runtime wiring in `start()`; create commands lazily. `PatchRegistry` reports a target that loaded too early, and `build.py --verify` boots the game's JRE with the agent and fails if anything is missing.
 - Work that game state owns runs on the main thread. The dedicated server loads chunks on a loader thread; hooks reached from there do only thread-safe work and hand the rest to `Threads.onMain`.
 
 ## Keep it fast
@@ -37,7 +37,7 @@ The game only runs mod Lua in Kahlua, and these failures are in Java, outside an
 
 ## Build and verify
 
-- `python3 build.py --test --verify` compiles against the installed `projectzomboid.jar` (compile-time only), runs the unit tests in `agent/test`, writes `dist/splint.jar`, and applies every module's patches offline under the JDK verifier.
+- `python3 build.py --test --verify` compiles against the installed `projectzomboid.jar` (compile-time only), runs the unit tests in `agent/test`, writes `dist/splint.jar`, applies every module's changes offline under the JDK verifier, checks that every hook and redirect target exists with the exact descriptor, and finally boots the game's own JRE with the agent to confirm `PatchRegistry` reports everything applied.
 - `lab/splintlab.py` runs a disposable loopback multiplayer session: the steamcmd dedicated server in `.lab/server` (app 380870), an Xvfb display and a headless client from the local game install. `lab/scenarios.py run .lab/runs/<new-dir> [--agent dist/splint.jar]` runs every failure scenario in its own session (or one session with `--shared`) and writes `results.json`; `lab/scenarios.py repro NAME DIR` sets one up and leaves it running; `lab/report.py` builds the vanilla-vs-Splint table. Run it with and without the agent; the patched run must keep the world update alive in every scenario and lose no animals.
 - Expected results come from the bug report, the user's request and vanilla's measured behaviour, never from Splint's own output.
 - The lab never accepts the game's terms itself; it copies the acceptance from `~/Zomboid/options.ini`. Everything it creates lives under `.lab/` (ignored by Git). Stop stray sessions with `lab/splintlab.py stop <evidence-dir>`.

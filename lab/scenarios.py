@@ -104,6 +104,14 @@ def fresh_spot(s: Session, dx: int) -> tuple[int, int]:
     return here(s)
 
 
+TOTAL_ANIMALS = ("local n=0 local l=getCell():getObjectListForLua() for i=0,l:size()-1 do "
+                 "if instanceof(l:get(i),'IsoAnimal') then n=n+1 end end return n")
+
+
+def player_alive(s: Session) -> bool:
+    return s.lua("local p=SplintLabServer.player() return tostring(p ~= nil)").endswith("true")
+
+
 def tick_rate(s: Session, window: float = 20) -> float:
     """Server world-update ticks per second, from the fixture's heartbeat (0 when stopped)."""
     off = s.log_size()
@@ -432,6 +440,8 @@ def stress(s: Session, total: int, spread: int, dx: int) -> dict:
     server's tick rate is measured before and after. Vanilla's 0-9999 IDs give about
     total*(total-1)/2/10000 duplicate pairs at this size (200 at 2000, 1250 at 5000)."""
     x, y = fresh_spot(s, dx)
+    # Grown rams and boars attack; a dead player would unload the area and corrupt every count.
+    s.lua("local p=SplintLabServer.player() p:setGodMod(true) p:setInvincible(true) return 1")
     base_tps = tick_rate(s)
     mix = {"chick": 0.6, "piglet": 0.15, "lamb": 0.15, "turkeypoult": 0.1}
     days = {"chick": 110, "piglet": 130, "lamb": 170, "turkeypoult": 110}
@@ -442,12 +452,16 @@ def stress(s: Session, total: int, spread: int, dx: int) -> dict:
             s.server(f"spawn {kind} - {batch} 0 0 {spread} {days[kind]}", timeout=300)
             n -= batch
     before = census(s, x, y, spread + 3, timeout=600)
+    total_before = int(s.lua(TOTAL_ANIMALS, timeout=600).split()[-1])
     loaded_tps = tick_rate(s)
     off = s.log_size()
     grown = s.lua(force_growth_code(x, y, spread + 3), timeout=600)
     time.sleep(60)
     after = census(s, x, y, spread + 3, timeout=600)
-    return {"before": before, "forced": grown, "after": after, "lost": count(before) - count(after),
+    total_after = int(s.lua(TOTAL_ANIMALS, timeout=600).split()[-1])
+    return {"before": before, "forced": grown, "after": after,
+            "animals_in_update_list_before": total_before, "animals_in_update_list_after": total_after,
+            "lost": total_before - total_after, "player_alive": player_alive(s),
             "tps_empty": base_tps, "tps_with_animals": loaded_tps, "tps_after_growth": tick_rate(s),
             "exceptions": exceptions(s.log_since(off)), "lua_alive": heartbeat_alive(s)}
 
