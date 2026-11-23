@@ -75,7 +75,7 @@ What differs for unloaded animals is how time is applied:
 
 - **Loaded, nobody near:** on a dedicated server every animal is updated every frame (the scheduler's distance throttling is client-only). Age advances by `modifier` days per in-game day.
 - **Unloaded, inside a player's animal zone:** on reload, `DesignationZoneAnimal.doMeta` calls `updateStatsAway(hours)`, which adds `floor(hours/24) × modifier` days in one step. Several growth stages can then be passed on consecutive frames after the area loads. That is a burst of growth right when a player arrives, which fits "loading OvO Farms and leaving it" as a trigger for growth-related failures.
-- **Hutch, trailer, inventory:** they age only while loaded, with no catch-up. Hutch animals never change stage while inside (`IsoHutch.updateAnimalInside` has no `checkStages`). They grow as soon as they are released.
+- **Hutch, trailer, inventory:** measured in finding 17. Carried animals do not age at all; trailer animals age while loaded, with no catch-up. Hutch animals never change stage while inside (`IsoHutch.updateAnimalInside` has no `checkStages`). They grow as soon as they are released.
 - **Wild or virtual animals** do not age while virtual.
 
 So a server on "Very Fast" ages every animal 10×, everywhere. Nothing is extra for empty chunks.
@@ -84,7 +84,7 @@ So a server on "Very Fast" ages every animal 10×, everywhere. Nothing is extra 
 
 - **Hutch:** chicks past their growth age stay chicks while inside (`IsoHutch.updateAnimalInside` has no stage check). On release they all grow on the next frames, at the hutch's exit square. A hutch therefore concentrates growth events, all of them at one spot, which is exactly where a nearby ghost does the most damage.
 - **Trailer:** juveniles in a livestock trailer grow in place and keep their IDs (`replaceGrownAnimalInTrailer`). The next stage is still constructed at the trailer animal's stored coordinates first, so the constructor's water and duplicate checks run there. Unloading a trailer constructs the animal at the trailer's "AnimalEntry" area, another spot that can be a water square.
-- **Inventory:** see the open questions.
+- **Inventory:** see finding 17.
 
 ### 10. Duplicate IDs also lose animals when a chunk unloads (code; lab `legacy-dup-reload`)
 
@@ -103,6 +103,8 @@ When a mass spawn overlapped a river, 303 of the new animals came out half-built
 | 3, 11 ghosts | Animals created on water are moved to land. Ghosts found on update, at chunk unload, at save, or beside a growing animal are removed with a removal that cannot throw. The constructor's duplicate check no longer runs before the ID exists. |
 | 4, 5, 6 limbo | The update scheduler's per-object calls (preupdate, frameStep, update, postupdate) are each isolated for every moving object, as are animal sound and hutch updates: a failure is logged with location and players, and the object is frozen with back-off after 3 failures in a row instead of aborting the world update. The lab's damaged-animal case (`malformed-breed`) failed in postupdate, which an update-only guard would have missed. |
 | 7 `remove animals` | `/splint animals kill` with combinable selections (cell, area, player, hutch, trailer, inventory, type, stage, sex, age, place, ghosts, frozen, duplicates), dry run by default. |
+| 14 saves fail | Ghosts never form or are removed first, so saves complete. If one still reaches a herd being saved, it is dropped before the herd is counted (`VirtualAnimal.save`), so one bad animal can no longer abort a save. `build.py --verify` checks this against the real save method. |
+| 15 trailer at the water | The animal built at a water square is moved to the nearest land before it is initialised, so it comes out whole. |
 
 ### 13. Lab scenarios
 
@@ -147,8 +149,61 @@ Notes:
 - `legacy-dup-reload` did not trigger vanilla's herd-join drop (finding 10) in this run; the duplicate simply survived. With Splint it was repaired.
 - `inventory-growth`, `trailer-growth` and `hutch-growth` behave the same with and without Splint; they document how growth works in each storage place (finding 9).
 
-## Open questions
+## Open questions, answered (2026-11-23)
 
-- The first ghost on the incident server is not identified. Water squares, a removed animal mod's type, and trailer unloading at the water's edge all produce one in vanilla. A log from before the first error, or `/splint animals census` on the affected cells with Splint installed, would show which one.
-- Whether the rollback helped because it removed a ghost-producing situation from the save, or only because the restart cleared in-memory ghosts, cannot be told from the report. Ghosts left only on a square (finding 5) are never saved. Ghosts still in the update list (findings 3 and 4) are handed to the population save, where `IsoAnimal.save` dereferences their null data (code; not reproduced in the lab). A restart clears the in-memory ones until the situation that creates them recurs.
-- A carried juvenile that reaches its growth age leaves the inventory: `grow` removes the inventory item, and the next stage is created at the animal's stored map position (lab `inventory-growth`). Where that position is and whether it is loaded decides where the grown animal ends up. This is the most concrete mechanism found for the "ghost chicken in my pocket" account, but it was not linked to the incident.
+The three open questions were taken back to the lab with new scenarios (`lab/scenarios.py`, the `OPEN_QUESTIONS` set). Each was run on vanilla and with Splint. Restarts are real: the server saves through its own `quit`, and a new session continues that save with the same player (`splintlab.py start --resume`). In-game time runs in the "time chamber" (one real minute per in-game day, `settimespeed 20`: about 7 in-game hours per real second, tick rate unchanged), and scenarios wait for in-game hours, not real seconds; `time-chamber` measured the speeds. Juveniles are set half a day short of their growth age, read from the game's own stage table, so the game's clock makes them grow.
+
+### 14. Why the rollback helped: a ghost makes every save fail partway (reproduced: `ghost-save-restart`)
+
+With a ghost in memory, vanilla cannot save:
+
+- **`save` (what scheduled saves run):** the console prints "World saved" at once, then the save writes the map and the players and throws in the animal population save (`IsoAnimal.save`: "this.data" is null, through `AnimalPopulationManager.save` → `AnimalManagerWorker.save` → `VirtualAnimal.save`). "Saving finish" never comes. After a restart the player was where they had been, but 5 of the 6 hens placed before the save were gone.
+- **`quit` (a restart):** the shutdown save hits the same exception in its own thread, which dies; the save never finishes and the server has to be killed. The world that loads next is whatever earlier saves left on disk.
+
+The ghost itself is never written (the save fails on it), so the world that loads is free of it and runs normally. That is what the 20-hour rollback did: it went back to a save from before the ghost, losing everything since. Any restart does the same with the latest saves, losing what failed to save. The failure comes back when whatever made the ghost happens again. Stock servers save only when areas unload (`SaveWorldEveryMinutes=0`), so failing saves can go unnoticed for a long time.
+
+With Splint the ghost never forms (or is removed first); `save` and `quit` complete and the restarted world has everything. As a last line of defence, a ghost that still reaches a herd being saved is dropped before the herd is counted, so one bad animal can no longer abort a save (finding 12; checked against the real save method by `build.py --verify`).
+
+### 15. A trailer unloaded at the water's edge makes ghosts (reproduced: `trailer-unload-water`)
+
+`BaseVehicle.removeAnimalFromTrailer` builds the animal anew (`new IsoAnimal(...)`) at the centre of the trailer's `AnimalEntry` area, about one and a half tiles behind it, then copies the old animal into it; `ISRemoveAnimalFromTrailer` adds it to the world. When that spot is a water square, the constructor stops early (finding 3) and the copy restores the ID and data but not the type. In the lab, two hens unloaded from a trailer backed up to Fallas Lake came out with `type=nil`; the world update stopped at once (424 `turnDelta` errors, Lua ticks dead, player stats frozen).
+
+This is the most concrete source found for the incident's first ghost: the report ties the failure to a player with a trailer full of chickens. It is not proven to be the one on that server. With Splint the same unload moves the hens to the nearest land; they come out whole and nothing fails.
+
+### 16. Ruled out by the lab
+
+None of these produced a ghost, an exception or a stopped world update, on vanilla or with Splint:
+
+| Report clue | Scenario | Result |
+|---|---|---|
+| A player logs back in next to a trailer full of chickens | `trailer-relog` | All 8 animals intact after save and relog; the chicks grow in the trailer later |
+| "I butchered some chickens before I logged" | `weapon-kill-butcher` | One hen killed with a weapon from each weapon category the game defines (9, read from the item scripts: ranged, axe, blunt, improvised, long blade, small blade, small blunt, spear, unarmed), 8 carcasses butchered the game's way (626 items), one carried; save, relog and two in-game days are clean |
+| "Possibly a ghost chicken in my pocket" (carcasses) | `carcass-relog` | Three carried chicken carcasses survive save, relog and two in-game days |
+| "Loading OvO Farms and leaving it" | `ovo-farms` | Ovo Farms (1245 Payne Road, Echo Creek, three chicken ranch zones around 3960,10805) visited, left for 2.5 in-game days twice, chicks growing while it is unloaded: no errors, no ghosts. Animals of a reloaded farm come back from the population worker some time after the area loads, so a count right after arriving can be short; Splint's run found all 7 IDs again on the next visit |
+
+### 17. Carried, trailered and hutched animals (reproduced: `pocket-far-growth`, `pocket-relog`, `trailer-relog`, `hutch-pocket`, `aging-rates`)
+
+- **Carried animals do not age.** A chick carried for 65 in-game hours stayed at 125 days (its hours survived moved by 4), so it never reached its growth age. Finding 8's code reading ("age only while loaded") was wrong for the inventory.
+- **A carried animal grows only if it is already past its growth age** (in the original `inventory-growth`, set by the lab). `AnimalData.grow` then builds the next stage at the coordinates the animal carries (where it was last on the ground or in a hutch), removes the item and adds the grown animal to the world there, not next to the player.
+- **After a relog, a carried animal is inert.** It keeps its stored coordinates but loses its container link (`getContainer()` is null) and does not grow even when set past its growth age. With a null container, `grow` would delete the old animal without removing its item, but carried animals are not updated after a relog, so the lab could not reach that path.
+- **Trailer animals age while loaded** (125 to 128 days in 66 in-game hours) and grow in place. In the chamber only one of six grew: the trailer updates its animals on a real-time limiter, so a test that passes days in seconds starves it. That is a limit of the chamber, not a game bug.
+- **Hutch animals** stay chicks past their growth age inside the hutch (finding 9) and keep the hutch tiles as their coordinates, across a restart. Taking one out after a restart, as `ISHutchGrabAnimal` does, puts it in the pocket cleanly: nothing appears in the world and nothing fails, on vanilla and with Splint.
+- **Aging rates by place** (`aging-rates`, days of age per in-game day, Normal age speed):
+
+  | Place | Slow clock (1 real minute per day) | Time chamber |
+  |---|---|---|
+  | On the map | 0.99 | 0.82 |
+  | Livestock trailer | 0.99 | 0.82 |
+  | Hutch | 0.99 | 0.82 |
+  | Carried | 0.5 | 0.0 |
+
+  Nothing ages faster anywhere, which confirms finding 8: aging follows the sandbox setting. Carried animals barely age (ages are whole days, so 0.5 is coarse). The chamber runs every place about 18% slow, a limit of the chamber; rates are measured at the slow clock.
+
+### 18. `grow` deletes an animal standing on water (code)
+
+After building the next stage, `AnimalData.grow` calls `parent.checkForWater()` and deletes both when it returns true. An animal that is on a water square when it grows disappears without a log line. Splint moves it to land instead. Animals in a trailer, an inventory or a hutch are not affected in practice: the game clears their square when they are stored, so the check finds no water (`stored-on-water-growth`: trailer chicks with a water position grew normally on vanilla and with Splint). Splint also never deletes a stored animal for it, in case one keeps a square.
+
+### Still open
+
+- Which source made the incident server's first ghost. Finding 15 fits the report best. With Splint installed, every removed ghost is logged with its place, coordinates, map cell and nearby players, and `/splint problems` lists them, so a recurrence would name it.
+- How the original `getAttachedTree` reports relate in time to the `textureSkinned` ones on that server; both come from the same ghosts in the lab (findings 5 and 6).
