@@ -107,6 +107,19 @@ public final class AnimalOps {
     }
 
 
+    /**
+     * Carried animals in a container and every bag inside it. Found by the game's own item class,
+     * not an item type name, so animal items added by mods or later game versions count too.
+     */
+    public static List<AnimalInventoryItem> carried(ItemContainer c) {
+        List<AnimalInventoryItem> out = new ArrayList<>();
+        if (c == null) return out;
+        for (InventoryItem item : c.getAllRecurse(i -> i instanceof AnimalInventoryItem)) {
+            out.add((AnimalInventoryItem) item);
+        }
+        return out;
+    }
+
     /** Whether the animal is a juvenile that will still grow (vanilla isBaby, safe on ghosts). */
     public static boolean isJuvenile(IsoAnimal a) {
         try {
@@ -169,8 +182,8 @@ public final class AnimalOps {
         }
         for (IsoPlayer p : World.players()) {
             try {
-                for (InventoryItem item : p.getInventory().getAllTypeRecurse("Animal")) {
-                    if (item instanceof AnimalInventoryItem ai && ai.getAnimal() != null) {
+                for (AnimalInventoryItem ai : carried(p.getInventory())) {
+                    if (ai.getAnimal() != null) {
                         seen.put(ai.getAnimal(), new Found(ai.getAnimal(), Place.INVENTORY, ai,
                                 (int) p.getX(), (int) p.getY(), (int) p.getZ()));
                     }
@@ -265,8 +278,8 @@ public final class AnimalOps {
         quietly(() -> {
             ItemContainer c = a.getContainer();
             if (c == null) return;
-            for (InventoryItem item : c.getAllType("Animal")) {
-                if (item instanceof AnimalInventoryItem ai && ai.getAnimal() == a) removeCarried(ai);
+            for (AnimalInventoryItem ai : carried(c)) {
+                if (ai.getAnimal() == a) removeCarried(ai);
             }
         });
         detach(a);

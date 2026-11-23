@@ -198,7 +198,7 @@ final class AnimalSelector {
     static String carrier(Found f) {
         for (IsoPlayer p : World.players()) {
             try {
-                if (p.getInventory().getAllTypeRecurse("Animal").contains(f.holder())) return p.getUsername();
+                if (AnimalOps.carried(p.getInventory()).contains(f.holder())) return p.getUsername();
             } catch (Throwable ignored) {
                 // inventory not readable; skip this player
             }
