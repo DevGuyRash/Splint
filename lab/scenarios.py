@@ -1019,6 +1019,29 @@ def stored_on_water_growth(s: Session) -> dict:
     return out
 
 
+def server_zombie_update(s: Session) -> dict:
+    """Does the dedicated server run zombie updates at all? MovingObjectUpdateScheduler.startFrame
+    skips every IsoZombie when GameServer.server is set (it only counts chasing zombies), so
+    zombies never reach the update buckets: connected clients simulate them. Checked here: a
+    zombie in the cell's update list gets no OnZombieUpdate events on the server, and clearing its
+    legs sprite, which IsoZombie.updateInternal dereferences, throws nothing."""
+    made = s.lua("local p=SplintLabServer.player() local zs=addZombiesInOutfit(math.floor(p:getX())+4,math.floor(p:getY()),0,1,nil,50) "
+                 "SplintLabServer.z=zs:get(0) SplintLabServer.zc=0 "
+                 "SplintLabServer.countZ=function(z) SplintLabServer.zc=SplintLabServer.zc+1 end Events.OnZombieUpdate.Add(SplintLabServer.countZ) "
+                 "return tostring(SplintLabServer.z:getClass())")
+    in_list = ("local z=SplintLabServer.z local l=getCell():getObjectListForLua() for i=0,l:size()-1 do "
+               "if l:get(i)==z then return 'yes' end end return 'no'")
+    time.sleep(10)
+    out: dict = {"zombie": made, "in_update_list": s.lua(in_list).split()[-1],
+                 "on_zombie_update_events_in_10s": s.lua("return SplintLabServer.zc").split()[-1]}
+    off = s.log_size()
+    s.lua("SplintLabServer.z:setLegsSprite(nil) return 1")
+    time.sleep(15)
+    out.update(lua_alive=heartbeat_alive(s), still_in_update_list=s.lua(in_list).split()[-1],
+               exceptions=exceptions(s.log_since(off)))
+    return out
+
+
 def aging_rates(s: Session) -> dict:
     """How fast animals age in each place they can be (on the map, carried, in a livestock
     trailer, in a hutch), measured as days of age gained per in-game day, at a slow clock and in
@@ -1128,6 +1151,7 @@ EXTRA.update(OPEN_QUESTIONS)
 EXTRA["time-chamber"] = time_chamber
 EXTRA["aging-rates"] = aging_rates
 EXTRA["stored-on-water-growth"] = stored_on_water_growth
+EXTRA["server-zombie-update"] = server_zombie_update
 
 
 def start(evidence: Path, agent: str | None, resume: Path | None = None) -> Session:
