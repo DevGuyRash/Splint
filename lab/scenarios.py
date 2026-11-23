@@ -384,6 +384,12 @@ def start(evidence: Path, agent: str | None) -> Session:
             raise SystemExit(f"session failed to start: {evidence}")
         time.sleep(3)
     time.sleep(5)
+    if agent:
+        # A patched run is only evidence if the patch is live in this JVM.
+        status = console_reply(s, "splint status", wait=8)
+        if "methods patched" not in status or "IsoAnimal" in status.split("MISSING", 1)[-1:][0] and "MISSING" in status:
+            raise SystemExit(f"Splint is not active in {evidence}: {status[-400:]}")
+        (evidence / "splint-status.txt").write_text(status + "\n")
     return s
 
 

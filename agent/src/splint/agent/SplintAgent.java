@@ -68,18 +68,22 @@ public final class SplintAgent {
                 List<Patch> patches = name == null ? null : byOwner.get(name);
                 if (patches == null) return null;
                 LOADED.add(name);
+                byte[] out;
                 try {
-                    byte[] out = Patcher.apply(bytes, patches, APPLIED);
-                    Log.info("patched " + name.replace('/', '.') + " (" + patches.size() + " method(s))");
-                    return out;
+                    out = Patcher.apply(bytes, patches, APPLIED);
                 } catch (Throwable t) {
                     // Never take the server down over a patch: run that class unpatched.
-                    Log.error("could not patch " + name + "; running it unpatched", t);
+                    Log.boot("could not patch " + name + "; running it unpatched", t);
                     return null;
                 }
+                // The JVM discards a transformer's result if it throws, so report only through
+                // the boot log, which cannot throw or call back into game code.
+                Log.boot("patched " + name.replace('/', '.') + " (" + patches.size() + " method(s), loader "
+                        + (loader == null ? "bootstrap" : loader.getClass().getSimpleName()) + ")", null);
+                return out;
             }
         });
-        Log.info("Splint " + VERSION + " agent loaded (" + PATCHES.size() + " patches registered)");
+        Log.boot("Splint " + VERSION + " agent loaded (" + PATCHES.size() + " patches registered)", null);
     }
 
     /**

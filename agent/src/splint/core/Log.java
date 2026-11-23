@@ -19,6 +19,12 @@ public final class Log {
     private static final long SUMMARY_INTERVAL_MS = 60_000;
     private static volatile boolean gameLogging;
     private static final Map<String, Counter> COUNTERS = new ConcurrentHashMap<>();
+    /**
+     * The process's real standard output. The game replaces System.out with its own logger,
+     * which is not safe to call from inside class loading (where the agent's transformer runs).
+     */
+    private static final java.io.PrintStream BOOT = new java.io.PrintStream(
+            new java.io.FileOutputStream(java.io.FileDescriptor.out), true);
 
     private static final class Counter {
         long total;
@@ -75,6 +81,18 @@ public final class Log {
         return total;
     }
 
+    /** For the transformer: never touches game code, never throws. */
+    public static void boot(String message, Throwable t) {
+        try {
+            synchronized (BOOT) {
+                BOOT.println("[Splint] " + (t == null ? "INFO " : "ERROR ") + message);
+                if (t != null) BOOT.println(stack(t));
+            }
+        } catch (Throwable ignored) {
+            // nothing left to report to
+        }
+    }
+
     private static void write(String level, String message, Throwable t) {
         String line = "[Splint] " + level + " " + message;
         String trace = t == null ? null : stack(t);
@@ -88,8 +106,10 @@ public final class Log {
                 // fall through to stdout
             }
         }
-        System.out.println(line);
-        if (trace != null) System.out.println(trace);
+        synchronized (BOOT) {
+            BOOT.println(line);
+            if (trace != null) BOOT.println(trace);
+        }
     }
 
     public static String stack(Throwable t) {
