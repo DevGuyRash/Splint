@@ -76,6 +76,13 @@ def here(s: Session) -> tuple[int, int]:
     return int(x), int(y)
 
 
+# Gives animal `b` the ID of animal `a` the way a pre-Splint save can contain it: through the
+# original setter (Splint keeps it reachable as splint$setAnimalID), so Splint's guard on
+# setAnimalID does not refuse it. On vanilla it is the normal setter.
+FORCE_DUP = ("local function forceId(b, id) local raw = b['splint$setAnimalID'] "
+             "if raw then raw(b, id) else b:setAnimalID(id) end end ")
+
+
 def exceptions(text: str) -> dict[str, int]:
     """Exception messages in a server log excerpt, grouped and counted."""
     counts: dict[str, int] = {}
@@ -217,9 +224,9 @@ def duplicate_ids(s: Session) -> dict:
     s.server("spawn hen - 1 4 0 0 30")
     before = census(s, x, y, 8)
     off = s.log_size()
-    pair = s.lua(f"local t=SplintLabServer.animalsOnSquares({x},{y},0,8) local c,h for _,a in ipairs(t) do "
+    pair = s.lua(FORCE_DUP + f"local t=SplintLabServer.animalsOnSquares({x},{y},0,8) local c,h for _,a in ipairs(t) do "
                  "if a:getAnimalType()=='chick' then c=a elseif a:getAnimalType()=='hen' then h=a end end "
-                 "h:setAnimalID(c:getAnimalID()) c:setHoursSurvived(400*24) c:getData():setAge(400) "
+                 "forceId(h, c:getAnimalID()) c:setHoursSurvived(400*24) c:getData():setAge(400) "
                  "return c:getAnimalID()..'='..h:getAnimalID()")
     time.sleep(15)
     after = census(s, x, y, 8)
@@ -273,15 +280,19 @@ def admin_commands(s: Session) -> dict:
     out["setup"] = setup
     vid = re.search(r"vehicle=(-?\d+)", setup).group(1)
     user = re.search(r"user=(\S+)", setup).group(1)
-    dup = s.lua(f"local t=SplintLabServer.animalsOnSquares({x},{y},0,20) local a,b for _,an in ipairs(t) do "
+    dup = s.lua(FORCE_DUP + f"local t=SplintLabServer.animalsOnSquares({x},{y},0,20) local a,b for _,an in ipairs(t) do "
                 "if an:getAnimalType()=='hen' then if not a then a=an elseif not b then b=an end end end "
-                "b:setAnimalID(a:getAnimalID()) return a:getAnimalID()").split()[-1]
+                "forceId(b, a:getAnimalID()) return a:getAnimalID()").split()[-1]
+    # The ordinary setter must refuse to create a second duplicate (Splint only).
+    out["set_duplicate_refused"] = s.lua(f"local t=SplintLabServer.animalsOnSquares({x},{y},0,20) local a,c for _,an in ipairs(t) do "
+                                         "if an:getAnimalType()=='hen' and not a then a=an elseif an:getAnimalType()=='chick' and not c then c=an end end "
+                                         "c:setAnimalID(a:getAnimalID()) return tostring(c:getAnimalID() ~= a:getAnimalID())")
     time.sleep(3)
     r, cx, cy = 40, x // 256, y // 256
     near = f"near {x} {y} {r}"
     steps = [
         # (name, command, text that must appear in the reply)
-        ("status", "splint status", "15 of 15 patches applied, none missing"),
+        ("status", "splint status", "patches applied, none missing"),
         ("help", "splint help", "SELECTION terms combine"),
         ("census", f"splint animals census {near}", "31 animals {WORLD=25, HUTCH=3, TRAILER=2, INVENTORY=1}, babies 9"),
         ("census_dupes", f"splint animals census {near}", "duplicate-ID groups 1"),
@@ -298,7 +309,8 @@ def admin_commands(s: Session) -> dict:
         ("kill_trailer", f"splint animals kill trailer {vid} confirm", "Removed 2 of 2"),
         ("kill_limit", f"splint animals kill cell {cx} {cy} type hen sex female limit 5 confirm", "Removed 5 of 5"),
         ("census_final", f"splint animals census {near}", "15 animals {WORLD=15}"),
-        ("problems", "splint problems 5", "Animal problems handled since start"),
+        ("problems", "splint problems 5", "roblems handled since"),
+        ("modules", "splint modules", "animals: unique animal IDs"),
         ("bad_usage", "splint animals kill cell nope", "Not a number"),
         ("bad_term", "splint animals kill near 1 2 3 colour blue", "Unknown term 'colour'"),
     ]
@@ -307,6 +319,7 @@ def admin_commands(s: Session) -> dict:
         reply = console_reply(s, cmd)
         out[name] = reply
         checks[name] = expect in reply
+    checks["set_duplicate_refused"] = out["set_duplicate_refused"].endswith("true")
     out["checks"] = checks
     out["all_checks_pass"] = all(checks.values())
     out["lua_alive"] = heartbeat_alive(s)
@@ -446,9 +459,26 @@ def stress_5000(s: Session) -> dict:
     return stress(s, 5000, 35, -720)
 
 
+def legacy_dup_reload(s: Session) -> dict:
+    """Two hens share an ID (as in a save written before Splint), then their chunk unloads and
+    loads again when the player leaves and comes back."""
+    x, y = fresh_spot(s, 840)
+    s.server("spawn hen - 6 3 0 1 30")
+    made = s.lua(FORCE_DUP + f"local t=SplintLabServer.animalsOnSquares({x},{y},0,10) local a,b for _,an in ipairs(t) do "
+                 "if an:getAnimalType()=='hen' then if not a then a=an elseif not b then b=an end end end "
+                 "forceId(b, a:getAnimalID()) return a:getAnimalID()..'='..b:getAnimalID()")
+    before = census(s, x, y, 10)
+    off = s.log_size()
+    s.tp(x + 2000, y, settle=60)          # far enough for the chunks to unload
+    s.tp(x, y, settle=40)
+    after = census(s, x, y, 10)
+    return {"pair": made, "before": before, "after": after, "lost": count(before) - count(after),
+            "exceptions": exceptions(s.log_since(off)), "lua_alive": heartbeat_alive(s)}
+
+
 SCENARIOS = {f.__name__.replace("_", "-"): f for f in
              (mass_growth, duplicate_ids, invalid_type, water_seed, grow_near_ghost, grow_near_invalid_ghost,
-              malformed_breed, unload_with_ghost)}
+              malformed_breed, legacy_dup_reload, unload_with_ghost)}
 # Needs the agent; run with --only admin-commands.
 EXTRA = {"admin-commands": admin_commands, "stress-2000": stress_2000, "stress-5000": stress_5000}
 # Storage-place growth investigations.
@@ -475,7 +505,7 @@ def start(evidence: Path, agent: str | None) -> Session:
     if agent:
         # A patched run is only evidence if the patch is live in this JVM.
         status = console_reply(s, "splint status", wait=8)
-        if "methods patched" not in status or "MISSING" in status:
+        if "patches applied" not in status or "MISSING" in status:
             raise SystemExit(f"Splint is not active in {evidence}: {status[-400:]}")
         (evidence / "splint-status.txt").write_text(status + "\n")
     return s

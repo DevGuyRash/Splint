@@ -4,7 +4,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.WeakHashMap;
-import splint.core.Log;
+import splint.core.log.Log;
 import zombie.characters.animals.IsoAnimal;
 
 /**
@@ -31,16 +31,28 @@ public final class Quarantine {
     }
 
     private static final Map<IsoAnimal, State> STATES = new WeakHashMap<>();
+    /** Fast path for the per-tick checks: no lock and no map lookup while nothing has failed. */
+    private static volatile boolean any;
 
     private Quarantine() {}
 
-    public static synchronized boolean isFrozen(IsoAnimal a) {
-        State s = STATES.get(a);
-        return s != null && s.frozenUntil > System.currentTimeMillis();
+    public static boolean isFrozen(IsoAnimal a) {
+        if (!any) return false;
+        synchronized (Quarantine.class) {
+            State s = STATES.get(a);
+            return s != null && s.frozenUntil > System.currentTimeMillis();
+        }
     }
 
-    public static synchronized void succeeded(IsoAnimal a) {
-        if (STATES.isEmpty()) return;
+    public static void succeeded(IsoAnimal a) {
+        if (!any) return;
+        synchronized (Quarantine.class) {
+            succeededLocked(a);
+            any = !STATES.isEmpty();
+        }
+    }
+
+    private static void succeededLocked(IsoAnimal a) {
         State s = STATES.get(a);
         if (s != null && s.frozenUntil == 0) STATES.remove(a);
         else if (s != null) {
@@ -50,11 +62,12 @@ public final class Quarantine {
     }
 
     public static void failed(IsoAnimal a, String phase, Throwable t) {
-        Stats.updateFailures.incrementAndGet();
+        AnimalStats.UPDATE_FAILURES.incrementAndGet();
         String detail;
         boolean froze = false;
         synchronized (Quarantine.class) {
             State s = STATES.computeIfAbsent(a, k -> new State());
+            any = true;
             s.consecutive++;
             s.lastError = String.valueOf(t);
             if (s.consecutive >= FAILURES_TO_FREEZE) {
@@ -67,7 +80,7 @@ public final class Quarantine {
                 detail = "failure " + s.consecutive + " of " + FAILURES_TO_FREEZE + " before freezing";
             }
         }
-        Incidents.record(phase + " threw " + t.getClass().getSimpleName() + (froze ? ", frozen" : ""), a);
+        AnimalOps.incident(phase + " threw " + t.getClass().getSimpleName() + (froze ? ", frozen" : ""), a);
         String key = "animal-" + phase + ":" + t.getClass().getName() + ":" + firstLine(t.getMessage());
         Log.problem("ERROR", key, "animal " + phase + " threw " + t + "; contained, world update continues; " + detail
                 + "; " + AnimalOps.describe(a), froze ? null : t);
@@ -87,6 +100,7 @@ public final class Quarantine {
 
     public static synchronized void release(IsoAnimal a) {
         STATES.remove(a);
+        any = !STATES.isEmpty();
     }
 
     private static String firstLine(String s) {

@@ -4,12 +4,13 @@ Splint is a server-side fix and admin-tools patch for Project Zomboid Build 42 d
 
 What it does today:
 
-- **Unique animal IDs.** Vanilla gives each new animal `Rand.Next(10000)`, a random number from 0 to 9999 with no uniqueness check. A 460-animal test farm held 10 duplicate pairs. Splint issues IDs from a per-world counter that starts at 10000 and only increases, persisted in the save so restarts and crashes never reuse one.
+- **Unique animal IDs, generated correctly.** Vanilla's only source of new animal IDs is `this.animalId = Rand.Next(10000)` in `IsoAnimal.init`: a random number from 0 to 9999 with no uniqueness check. A 460-animal test farm held 8 to 13 duplicate pairs. Splint replaces that call site with a per-world allocator: IDs start at 10000, only increase, and are persisted in the save in reserved blocks, so restarts and crashes never reuse one. IDs loaded from a save move the counter past them.
 - **No half-built animals.** Vanilla can leave an animal with no type, data or ID in the world: when it is created on a water square, or with an unknown type, or by its own duplicate check. One such animal throws on every frame and stops the whole world update. Splint moves animals created on water to the nearest land, removes ghosts it finds, and makes animal removal always complete.
 - **Failure isolation.** An exception in one animal's update, sound update or hutch update is caught, logged with its location, and contained. The rest of the world keeps running. An animal that keeps failing is frozen in place and retried with back-off; admins can inspect, release or remove it.
 - **No silent animal loss.** When an animal grows next to another animal with the same ID, vanilla deletes both the animal and its next stage. Splint keeps both and gives the newcomer a fresh ID.
-- **Logging.** Every problem is written with the animal's type, breed, ID, coordinates, map cell, `apop_X_Y.bin` file, chunk, hutch or trailer, age and nearest player. It goes to the console and to `Logs/*_Splint.txt`, with repeats rate limited.
-- **Admin commands.** `/splint ...` works from the server console, RCON and in-game chat (admins). Destructive commands are dry runs until you add `confirm`.
+- **Logging for admins, not players.** Every problem is written with the animal's type, breed, ID, coordinates, map cell, `apop_X_Y.bin` file, chunk, hutch or trailer, age, the nearest player and every player in that map cell. It goes to the server console/stdout and to `Logs/<date>_Splint.txt` next to the game's own logs, with repeats rate limited. Nothing is ever sent to players; command replies go only to the admin who ran them.
+- **Incident history.** `/splint problems` lists what Splint handled since start, the map cells where it happened most, who is in those cells right now, and the latest incidents, so on a 100+ player server you can find the place and the people without guessing.
+- **Admin commands with combinable filters.** `/splint ...` works from the server console, RCON and in-game chat (admins). Every animal command takes the same selection terms, so you can say "chicks in map cell 42,36, but not the ones in hutches" in one command. Destructive commands are dry runs until you add `confirm`, and every removal is logged with the admin's name.
 
 The full investigation, with the reproduced failures, is in [docs/investigation.md](docs/investigation.md).
 
@@ -37,19 +38,46 @@ On a hosting panel that cannot edit `ProjectZomboid64.json` or the JVM arguments
 
 ## Commands
 
+From the console or RCON, drop the leading slash.
+
 ```
-/splint status                                  patch health, ID counter, counters since start
-/splint animals census [AREA]                   animals by map cell and type, ghosts, duplicate IDs, frozen
-/splint animals list AREA [TYPE]                individual animals with ID, place and coordinates
-/splint animals find ID                         where the animal with this ID is
-/splint animals kill AREA [TYPE] [confirm]      remove animals
-/splint animals fixids [confirm]                give every duplicate animal ID a fresh unique one
-/splint animals frozen [release|kill] [confirm] animals frozen after repeated errors
+/splint status                       patch health, ID counter, counters since start
+/splint problems [N]                 what Splint handled: by kind, worst map cells (with who is there now), latest N
+/splint players [SELECTION]          online players: position, map cell, animals around them
+/splint animals census [SELECTION]   counts by map cell, place, type and stage; babies, ghosts, duplicates, frozen
+/splint animals list [SELECTION]     individual animals: ID, type, stage, place, coordinates
+/splint animals find ID              where the animal with this ID is
+/splint animals kill SELECTION [confirm]       remove animals
+/splint animals fixids [SELECTION] [confirm]   give duplicate IDs fresh unique ones
+/splint animals frozen [release|kill] [confirm]
 ```
 
-`AREA` is one of `cell CX CY`, `near X Y R`, `me R`, `hutch X Y Z`, `hutches cell CX CY`, `trailer VEHICLE_ID`, `trailers near X Y R`, `inventory USERNAME`, `ghosts`, `id ID` or `all`. A map cell is `floor(x/256), floor(y/256)`, the same numbers as the `apop_CX_CY.bin` population file. `TYPE` is an animal type (`hen`, `chick`, `cow`...), a group (`chicken`, `pig`...) or `ghost`. From the console use the command without the leading slash. Commands see animals the server has in memory: everything in loaded areas, hutches, trailers and online players' inventories. Animals in areas nobody has loaded are not in memory.
+A SELECTION is any combination of these terms, in any order:
 
-Example: an error names `cell=42,36`. Run `splint animals census cell 42 36` to see what is there, `splint animals kill hutches cell 42 36` to check what removing hutch animals would do, and repeat it with `confirm`.
+| Term | Meaning |
+|---|---|
+| `cell CX CY` | map cell `floor(x/256), floor(y/256)`, the same numbers as `apop_CX_CY.bin` |
+| `near X Y R`, `me R`, `player NAME [R]` | squares around a point, yourself, or an online player (default 50) |
+| `hutch X Y Z`, `trailer VEHICLE_ID`, `inventory NAME` | one hutch, one trailer, one player's carried animals |
+| `type T[,T...]` | animal type (`hen`, `chick`, `cow`...) or group (`chicken`, `pig`, `sheep`...) |
+| `stage baby` / `stage adult` | babies are animals that will still grow (chick, piglet, lamb...) |
+| `sex male`, `sex female`, `age MIN-MAX` | age in days; `age 120-` and `age -7` work too |
+| `in PLACES`, `except PLACES` | places are `world`, `hutch`, `trailer`, `inventory` |
+| `ghosts`, `frozen`, `dupes` | only uninitialised, frozen, or duplicate-ID animals |
+| `id N[,N...]`, `limit N` | specific animals; act on at most N |
+
+Several where-terms (`cell`, `near`, `hutch`...) add up; every filter must match. `kill` touches the map, hutches and trailers by default, never a player's pockets unless you name `inventory NAME` or `in inventory`. Commands see what the server has in memory: everything in loaded areas, hutches, trailers and online players' inventories.
+
+Examples:
+
+```
+splint problems
+splint animals census cell 42 36
+splint animals kill cell 42 36 type chicken stage baby except hutch
+splint animals kill cell 42 36 in hutch confirm
+splint animals list player Bob 40 type cow sex female
+splint animals kill near 10850 9420 30 ghosts confirm
+```
 
 ## Build
 
@@ -61,9 +89,11 @@ python3 build.py --verify
 
 This writes `dist/splint.jar` and checks every patch against the installed game's bytecode. After a game update, a patch whose method changed is reported as not applied; the server then runs that method unpatched instead of failing.
 
-## Test lab
+## Test lab (repository only, not shipped)
 
-`lab/` reproduces the failures on a disposable loopback multiplayer server: the steamcmd dedicated server (app 380870) plus a headless game client, so chunks load around a real connected player. See [AGENTS.md](AGENTS.md).
+`lab/` reproduces the failures on a disposable loopback multiplayer server: the steamcmd dedicated server (app 380870) plus a headless game client, so chunks load around a real connected player. It is development tooling; `dist/splint.jar` contains none of it. See [AGENTS.md](AGENTS.md).
+
+Run every scenario, without and with Splint:
 
 ```bash
 python3 lab/scenarios.py run .lab/runs/vanilla
@@ -72,6 +102,14 @@ python3 lab/scenarios.py run .lab/runs/vanilla
 ```bash
 python3 lab/scenarios.py run .lab/runs/splint --agent dist/splint.jar
 ```
+
+Set up one scenario and leave the server running to inspect it by hand:
+
+```bash
+python3 lab/scenarios.py repro grow-near-ghost .lab/runs/repro-1
+```
+
+Scenarios include the report's exact stack (`grow-near-ghost`, `grow-near-invalid-ghost`), the `getAttachedTree` + `textureSkinned` pair on chunk unload (`unload-with-ghost`), duplicate-ID animal loss, hutch/trailer/inventory growth, a damaged animal (`malformed-breed`), the admin commands with asserted results, and 2,000- and 5,000-animal stress tests with tick-rate measurement.
 
 ## Scope and limits
 

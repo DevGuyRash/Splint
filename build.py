@@ -25,7 +25,7 @@ CANDIDATES = [
     Path.home() / ".steam/steam/steamapps/common/Project Zomboid Dedicated Server/java/projectzomboid.jar",
     Path.home() / ".steam/steam/steamapps/common/ProjectZomboid/projectzomboid/projectzomboid.jar",
 ]
-VERSION_FILE = ROOT / "agent/src/splint/agent/SplintAgent.java"
+VERSION_FILE = ROOT / "agent/src/splint/core/Splint.java"
 
 
 def version() -> str:
@@ -51,6 +51,8 @@ def main() -> None:
     sources = sorted(str(s) for s in (ROOT / "agent/src").rglob("*.java"))
     subprocess.run(["javac", "--release", "25", "-Xlint:all,-serial,-processing", "-Werror", "-encoding", "UTF-8",
                     "-cp", str(jar), "-d", str(classes), *sources], check=True)
+    # Resources (the module service list) go into the jar beside the classes.
+    shutil.copytree(ROOT / "agent/resources", classes, dirs_exist_ok=True)
     manifest = build / "MANIFEST.MF"
     manifest.write_text(f"Premain-Class: splint.agent.SplintAgent\nImplementation-Title: Splint\n"
                         f"Implementation-Version: {version()}\n")

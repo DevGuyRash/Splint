@@ -1,4 +1,4 @@
-package splint.agent;
+package splint.core.patch;
 
 import java.lang.classfile.ClassFile;
 import java.lang.classfile.ClassModel;
@@ -50,12 +50,15 @@ public final class Patcher {
     /**
      * Inside {@code owner.method}, replaces a static call {@code callOwner.callName callDesc}
      * whose result is stored straight into the field {@code storeField} of the class, with a
-     * call to {@code newOwner.callName}-compatible static {@code newName} of the same descriptor.
-     * Used where vanilla computes a value badly in one expression (the animal ID) and the fix is
-     * to compute it correctly there, not to overwrite it afterwards.
+     * call to the static {@code newOwner.newName}. With {@code passThis} the original call's
+     * arguments are dropped and the receiver ({@code this}) is passed instead, so the
+     * replacement knows which object the value is for; its descriptor is then
+     * {@code (Lowner;)R}, otherwise it is {@code callDesc}.
+     * Used where vanilla computes a value badly in one expression (the animal ID) and the fix
+     * is to compute it correctly there, not to overwrite it afterwards.
      */
     public record Redirect(String owner, String method, String methodDesc, String callOwner, String callName,
-                           String callDesc, String storeField, String newOwner, String newName) {
+                           String callDesc, String storeField, String newOwner, String newName, boolean passThis) {
         public String key() { return owner + "." + method + methodDesc + "@" + callOwner + "." + callName; }
     }
 
@@ -171,7 +174,19 @@ public final class Patcher {
                 if (e instanceof java.lang.classfile.instruction.FieldInstruction f
                         && f.opcode() == java.lang.classfile.Opcode.PUTFIELD
                         && f.owner().asSymbol().equals(owner) && f.name().equalsString(r.storeField())) {
-                    b.invokestatic(ClassDesc.ofInternalName(r.newOwner()), r.newName(), call.typeSymbol());
+                    if (r.passThis()) {
+                        // Drop the original arguments (stack top, last argument first).
+                        var params = call.typeSymbol().parameterList();
+                        for (int k = params.size() - 1; k >= 0; k--) {
+                            if (TypeKind.from(params.get(k)).slotSize() == 2) b.pop2();
+                            else b.pop();
+                        }
+                        b.aload(0);
+                        b.invokestatic(ClassDesc.ofInternalName(r.newOwner()), r.newName(),
+                                MethodTypeDesc.of(call.typeSymbol().returnType(), owner));
+                    } else {
+                        b.invokestatic(ClassDesc.ofInternalName(r.newOwner()), r.newName(), call.typeSymbol());
+                    }
                     applied.add(r.key());
                 } else {
                     b.with(call);

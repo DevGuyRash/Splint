@@ -1,12 +1,12 @@
-package splint.commands;
+package splint.core.command;
 
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
 import java.util.Arrays;
 import java.util.regex.Pattern;
-import splint.agent.Patcher;
-import splint.core.Log;
+import splint.core.patch.Patcher;
+import splint.core.log.Log;
 import zombie.commands.CommandBase;
 
 /**

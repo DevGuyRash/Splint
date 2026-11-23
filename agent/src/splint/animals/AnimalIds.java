@@ -9,7 +9,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.concurrent.ThreadLocalRandom;
-import splint.core.Log;
+import java.util.concurrent.atomic.AtomicLong;
+import zombie.characters.animals.IsoAnimal;
+import splint.core.log.Log;
 
 /**
  * Unique animal IDs.
@@ -33,6 +35,7 @@ public final class AnimalIds {
     /** IDs above this are not followed by the counter (leaves room for 1e9 more IDs). */
     private static final int OBSERVE_LIMIT = 2_000_000_000;
 
+    private static final AtomicLong ASSIGNED = splint.core.Counters.of("animals", "idsAssigned");
     private static boolean loaded;
     private static int next;
     private static int reservedUntil;
@@ -46,12 +49,16 @@ public final class AnimalIds {
     private static final ThreadLocal<Boolean> LOADING = ThreadLocal.withInitial(() -> false);
 
     /**
-     * Replaces vanilla's {@code Rand.Next(10000)} at the one place an animal ID is generated
-     * (IsoAnimal.init). {@code vanillaBound} is the ignored 10000. During a load no ID is
-     * consumed: the saved one is written right after init returns.
+     * Replaces vanilla's {@code this.animalId = Rand.Next(10000)} in IsoAnimal.init, the one
+     * place the game generates an animal ID: the new animal gets the next unique ID and is
+     * indexed under it. During a load no ID is consumed, because load restores the saved one
+     * right after init returns.
      */
-    public static int next(int vanillaBound) {
-        return LOADING.get() ? -1 : allocate();
+    public static int next(IsoAnimal animal) {
+        if (LOADING.get()) return -1;
+        int id = allocate();
+        AnimalIndex.put(id, animal);
+        return id;
     }
 
     /** Runs {@code load} with ID allocation suspended, then records the restored ID. */
@@ -72,7 +79,7 @@ public final class AnimalIds {
             next = FIRST;
             reserve();
         }
-        Stats.idsAssigned.incrementAndGet();
+        ASSIGNED.incrementAndGet();
         return id;
     }
 

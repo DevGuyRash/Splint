@@ -1,4 +1,4 @@
-package splint.core;
+package splint.core.log;
 
 import java.io.PrintWriter;
 import java.io.StringWriter;

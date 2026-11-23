@@ -8,7 +8,10 @@ import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Predicate;
-import splint.core.Log;
+import splint.core.log.Incidents;
+import splint.core.log.Log;
+import splint.core.world.Area;
+import splint.core.world.World;
 import zombie.MovingObjectUpdateScheduler;
 import zombie.characters.IsoPlayer;
 import zombie.characters.animals.AnimalDefinitions;
@@ -28,18 +31,14 @@ import zombie.vehicles.BaseVehicle;
 
 /** Finding, describing and removing animals, wherever they are stored. */
 public final class AnimalOps {
-    /** Map cells are 256x256 squares; the animal population files are named after them. */
-    public static final int CELL = 256;
-    public static final int CHUNK = 8;
-
     private AnimalOps() {}
 
     /** Where an animal lives right now. */
     public enum Place { WORLD, HUTCH, TRAILER, INVENTORY }
 
     public record Found(IsoAnimal animal, Place place, Object holder, int x, int y, int z) {
-        public int cellX() { return Math.floorDiv(x, CELL); }
-        public int cellY() { return Math.floorDiv(y, CELL); }
+        public int cellX() { return World.cell(x); }
+        public int cellY() { return World.cell(y); }
     }
 
     // --- identification -------------------------------------------------------------------
@@ -65,10 +64,8 @@ public final class AnimalOps {
             b.append(" id=").append(a.getAnimalID()).append(" onlineId=").append(a.getOnlineID());
             if (isGhost(a)) b.append(" GHOST(uninitialised)");
             int x = (int) Math.floor(a.getX()), y = (int) Math.floor(a.getY()), z = (int) Math.floor(a.getZ());
-            b.append(" at ").append(x).append(',').append(y).append(',').append(z);
-            b.append(" cell=").append(Math.floorDiv(x, CELL)).append(',').append(Math.floorDiv(y, CELL));
-            b.append(" chunk=").append(Math.floorDiv(x, CHUNK)).append(',').append(Math.floorDiv(y, CHUNK));
-            b.append(" apop=apop_").append(Math.floorDiv(x, CELL)).append('_').append(Math.floorDiv(y, CELL)).append(".bin");
+            b.append(" at ").append(World.where(x, y, z));
+            b.append(" apop=apop_").append(World.cell(x)).append('_').append(World.cell(y)).append(".bin");
             IsoGridSquare sq = a.getSquare();
             if (sq != null && sq.isWaterSquare()) b.append(" onWater");
             if (data != null) {
@@ -82,15 +79,17 @@ public final class AnimalOps {
             if (v != null) b.append(" trailer=").append(v.getScriptName()).append("#").append(v.getId())
                     .append('@').append((int) v.getX()).append(',').append((int) v.getY());
             if (a.isOnHook()) b.append(" onHook");
-            IsoPlayer near = nearestPlayer(a.getX(), a.getY());
-            if (near != null) b.append(" nearestPlayer=").append(near.getUsername()).append(" dist=")
-                    .append((int) Math.hypot(near.getX() - a.getX(), near.getY() - a.getY()));
-            List<String> inCell = playersInCell(Math.floorDiv(x, CELL), Math.floorDiv(y, CELL));
-            b.append(" playersInCell=").append(inCell.isEmpty() ? "none" : String.join(",", inCell));
+            b.append(World.whoIsNear(x, y));
         } catch (Throwable t) {
             b.append(" <describe failed: ").append(t).append('>');
         }
         return b.toString();
+    }
+
+    /** Records an incident about {@code a} for /splint problems. */
+    static void incident(String kind, IsoAnimal a) {
+        Incidents.record(AnimalsModule.ID, kind, (int) Math.floor(a.getX()), (int) Math.floor(a.getY()),
+                (int) Math.floor(a.getZ()), brief(a));
     }
 
     /** "chick#10421" (or "GHOST" for an uninitialised animal): short enough for lists. */
@@ -98,14 +97,6 @@ public final class AnimalOps {
         return (isGhost(a) ? "GHOST" : a.getAnimalType()) + "#" + a.getAnimalID();
     }
 
-    /** Online players standing in map cell (cx, cy). */
-    public static List<String> playersInCell(int cx, int cy) {
-        List<String> out = new ArrayList<>();
-        for (IsoPlayer p : players()) {
-            if (Math.floorDiv((int) p.getX(), CELL) == cx && Math.floorDiv((int) p.getY(), CELL) == cy) out.add(p.getUsername());
-        }
-        return out;
-    }
 
     /** Whether the animal is a juvenile that will still grow (vanilla isBaby, safe on ghosts). */
     public static boolean isJuvenile(IsoAnimal a) {
@@ -116,29 +107,7 @@ public final class AnimalOps {
         }
     }
 
-    public static IsoPlayer nearestPlayer(float x, float y) {
-        IsoPlayer best = null;
-        double bestD = Double.MAX_VALUE;
-        for (IsoPlayer p : players()) {
-            double d = Math.hypot(p.getX() - x, p.getY() - y);
-            if (d < bestD) { bestD = d; best = p; }
-        }
-        return best;
-    }
 
-    public static List<IsoPlayer> players() {
-        List<IsoPlayer> out = new ArrayList<>();
-        try {
-            if (GameServer.server) {
-                for (IsoPlayer p : GameServer.Players) if (p != null) out.add(p);
-            } else {
-                for (IsoPlayer p : IsoPlayer.players) if (p != null) out.add(p);
-            }
-        } catch (Throwable ignored) {
-            // players list unavailable during startup
-        }
-        return out;
-    }
 
     // --- enumeration ----------------------------------------------------------------------
 
@@ -158,9 +127,9 @@ public final class AnimalOps {
                 }
             }
             if (area != null) {
-                for (int x = area.x0; x <= area.x1; x++) {
-                    for (int y = area.y0; y <= area.y1; y++) {
-                        for (int z = Math.max(area.z0, SCAN_Z_MIN); z <= Math.min(area.z1, SCAN_Z_MAX); z++) {
+                for (int x = area.x0(); x <= area.x1(); x++) {
+                    for (int y = area.y0(); y <= area.y1(); y++) {
+                        for (int z = Math.max(area.z0(), SCAN_Z_MIN); z <= Math.min(area.z1(), SCAN_Z_MAX); z++) {
                             IsoGridSquare sq = cell.getGridSquare(x, y, z);
                             if (sq == null) continue;
                             for (IsoMovingObject o : sq.getMovingObjects()) {
@@ -189,7 +158,7 @@ public final class AnimalOps {
         } catch (Throwable t) {
             Log.problem("enumerate-hutches", "could not list hutch animals", t);
         }
-        for (IsoPlayer p : players()) {
+        for (IsoPlayer p : World.players()) {
             try {
                 for (InventoryItem item : p.getInventory().getAllTypeRecurse("Animal")) {
                     if (item instanceof AnimalInventoryItem ai && ai.getAnimal() != null) {
@@ -223,25 +192,12 @@ public final class AnimalOps {
         }
     }
 
-    /** Every floor Build 42 can have. */
-    static final int Z_MIN = -32, Z_MAX = 31;
     /**
      * Floors whose squares are scanned for square-only ghosts. Live animals on every floor are
      * found through the cell update list; scanning all 64 floors square by square would cost
      * too much for a command.
      */
     static final int SCAN_Z_MIN = -2, SCAN_Z_MAX = 3;
-
-    /** A box of squares; z range inclusive. */
-    public record Area(int x0, int y0, int x1, int y1, int z0, int z1) {
-        public static Area cell(int cx, int cy) {
-            return new Area(cx * CELL, cy * CELL, cx * CELL + CELL - 1, cy * CELL + CELL - 1, Z_MIN, Z_MAX);
-        }
-        public static Area radius(int x, int y, int r) { return new Area(x - r, y - r, x + r, y + r, Z_MIN, Z_MAX); }
-        public boolean contains(int x, int y, int z) {
-            return x >= x0 && x <= x1 && y >= y0 && y <= y1 && z >= z0 && z <= z1;
-        }
-    }
 
     // --- removal --------------------------------------------------------------------------
 
@@ -302,9 +258,9 @@ public final class AnimalOps {
                 if (item instanceof AnimalInventoryItem ai && ai.getAnimal() == a) removeCarried(ai);
             }
         });
-        Incidents.record("ghost removed (" + where + ")", a);
+        incident("ghost removed (" + where + ")", a);
         detach(a);
-        Stats.ghostsRemoved.incrementAndGet();
+        AnimalStats.GHOSTS_REMOVED.incrementAndGet();
         Log.problem("ghost-removed:" + where, "removed uninitialised animal (" + where + "): " + what, null);
     }
 
@@ -339,7 +295,7 @@ public final class AnimalOps {
                     }
                 }
             }
-            Stats.killedByCommand.incrementAndGet();
+            AnimalStats.KILLED_BY_COMMAND.incrementAndGet();
             return null;
         } catch (Throwable t) {
             Log.error("kill failed for " + describe(a), t);
@@ -350,7 +306,7 @@ public final class AnimalOps {
     /** Takes a carried animal item out of its container and out of its carrier's hands. */
     static void removeCarried(AnimalInventoryItem item) {
         ItemContainer c = item.getContainer();
-        for (IsoPlayer p : players()) {
+        for (IsoPlayer p : World.players()) {
             if (p.getPrimaryHandItem() == item) p.setPrimaryHandItem(null);
             if (p.getSecondaryHandItem() == item) p.setSecondaryHandItem(null);
         }
