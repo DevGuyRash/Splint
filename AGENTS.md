@@ -8,15 +8,18 @@ The game only runs mod Lua in Kahlua, and these failures are in Java, outside an
 
 - `splint.core` is the only place for shared machinery. Each concern has exactly one home:
   - `core.module`: the `SplintModule` SPI. Modules are listed in `agent/resources/META-INF/services/splint.core.module.SplintModule`. They are enabled by default; `-Dsplint.disable=` and `-Dsplint.modules=` switch them, and `Side` says where a module runs.
-  - `core.patch`: `Patcher` (method replacement, call-site redirect) and `PatchRegistry`, the single record of what is declared, applied and missing, which also owns the transformer.
+  - `core.patch`: `Patcher` (method replacement, expression redirect, call-site redirect, added fields), `Originals` (handles to original bodies) and `PatchRegistry`, the single record of what is declared, applied, pending and missing, which also owns the transformer.
   - `core.log`: `Log` (console/stdout and `Logs/*_Splint.txt`, rate-limited `problem`, `boot` for the transformer) and `Incidents` (what happened where, and who was there).
   - `core.world`: map cells, areas, players.
   - `core.command`: the one game command `/splint`, its dispatcher, global commands (`help`, `status`, `modules`, `problems`, `players`), `Args`, `AreaTerms` and `CommandContext`.
-  - `core.util`: data structures such as `IntWeakMap`.
+  - `core.isolate`: per-object update isolation. The update scheduler's per-object calls go through `Isolation`, and `Breaker` (state in a field added to `IsoMovingObject`) contains failures and freezes repeat offenders. `Describers` lets modules name their objects in logs.
+  - `core.util`: data structures such as `IntWeakMap`; `ObjectSlot` and `Threads` (main-thread queue) sit in `core`.
   - `Counters`, plus `Splint.tick()`, the per-frame heartbeat driving module ticks.
 - A module (`splint.<area>`) declares its patches, redirects, commands, counters, status and per-player info. It owns no plumbing. Anything a second module would also need belongs in core.
 - Every patch has a reproduced failure behind it, recorded in `docs/investigation.md` with the lab scenario that shows it. Do not add speculative patches. Fix at the source (a redirect or a replacement of the faulty logic) rather than overwriting results afterwards.
-- Hooks keep the original callable as `splint$<name>` through a per-hook holder class, so one patch that fails to apply cannot break another.
+- Hooks keep the original callable as `splint$<name>` through a per-hook holder class (`Originals`), so one patch that fails to apply cannot break another.
+- Modules are constructed in premain, before the transformer exists: a module's constructor and static fields must not touch game classes (use class names, as `Describers.register` does), or those classes load unpatched. `PatchRegistry` reports any target that loaded too early.
+- Work that game state owns runs on the main thread. The dedicated server loads chunks on a loader thread; hooks reached from there do only thread-safe work and hand the rest to `Threads.onMain`.
 
 ## Keep it fast
 

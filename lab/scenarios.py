@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -129,8 +130,8 @@ def stats_frozen(s: Session, wait: float = 15) -> bool:
     return grab(a) == grab(b)
 
 
-def census(s: Session, x: int, y: int, r: int = 30) -> str:
-    return s.lua(f"return SplintLabServer.census({x},{y},0,{r})")
+def census(s: Session, x: int, y: int, r: int = 30, timeout: float = 60) -> str:
+    return s.lua(f"return SplintLabServer.census({x},{y},0,{r})", timeout)
 
 
 def count(c: str) -> int:
@@ -440,12 +441,12 @@ def stress(s: Session, total: int, spread: int, dx: int) -> dict:
             batch = min(n, 500)
             s.server(f"spawn {kind} - {batch} 0 0 {spread} {days[kind]}", timeout=300)
             n -= batch
-    before = census(s, x, y, spread + 3)
+    before = census(s, x, y, spread + 3, timeout=600)
     loaded_tps = tick_rate(s)
     off = s.log_size()
-    grown = s.lua(force_growth_code(x, y, spread + 3), timeout=300)
+    grown = s.lua(force_growth_code(x, y, spread + 3), timeout=600)
     time.sleep(60)
-    after = census(s, x, y, spread + 3)
+    after = census(s, x, y, spread + 3, timeout=600)
     return {"before": before, "forced": grown, "after": after, "lost": count(before) - count(after),
             "tps_empty": base_tps, "tps_with_animals": loaded_tps, "tps_after_growth": tick_rate(s),
             "exceptions": exceptions(s.log_since(off)), "lua_alive": heartbeat_alive(s)}
@@ -486,7 +487,10 @@ EXTRA.update({f.__name__.replace('_', '-'): f for f in (inventory_growth, traile
 
 
 def start(evidence: Path, agent: str | None) -> Session:
-    cmd = [sys.executable, str(LAB / "splintlab.py"), "start", str(evidence)]
+    # The stock dedicated server runs with -Xmx8g (ProjectZomboid64.json); 5000 animated animals
+    # need it. SPLINT_SERVER_HEAP overrides.
+    cmd = [sys.executable, str(LAB / "splintlab.py"), "start", str(evidence),
+           "--server-heap", os.environ.get("SPLINT_SERVER_HEAP", "8g")]
     if agent:
         cmd += ["--agent", agent]
     evidence.mkdir(parents=True, exist_ok=True)
