@@ -992,10 +992,10 @@ def weapon_kill_butcher(s: Session) -> dict:
 
 
 def stored_on_water_growth(s: Session) -> dict:
-    """A trailer chick whose stored square is water reaches its growth age. AnimalData.grow
-    deletes the animal and its next stage when checkForWater says the parent stands on water,
-    which a stored animal does not. The water square is set directly (a constructed state: a
-    trailer animal keeps whatever square it last had)."""
+    """Trailer chicks positioned over water reach their growth age. AnimalData.grow deletes the
+    animal and its next stage when checkForWater (which reads the animal's square) says it stands
+    on water. Stored animals have no square, so this is a regression check: they must still grow.
+    The water position is set directly (a constructed state)."""
     s.tp(*LAKE_SHORE)
     made = s.lua(f"local tsq=getCell():getGridSquare({LAKE_SHORE[0]}-3,{LAKE_SHORE[1]},0) "
                  "local v=addVehicleDebug('Base.Trailer_Livestock',IsoDirections.N,nil,tsq) SplintLabServer.wv=v "
