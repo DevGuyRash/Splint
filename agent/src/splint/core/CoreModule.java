@@ -2,9 +2,15 @@ package splint.core;
 
 import java.util.List;
 import splint.core.module.SplintModule;
+import splint.core.command.ModuleCommand;
+import splint.core.patch.Patcher.CallSite;
+import splint.core.patch.Patcher.Field;
 import splint.core.patch.Patcher.Patch;
 
-/** Splint's own plumbing: the per-frame heartbeat and the /splint command. Always on. */
+/**
+ * Splint's own plumbing, always on: the per-frame heartbeat, the /splint command, and per-object
+ * isolation of the update scheduler (one broken object of any kind cannot stop the world).
+ */
 public final class CoreModule implements SplintModule {
     private static final String CORE_HOOKS = "splint/core/CoreHooks";
     private static final String COMMAND_HOOKS = "splint/core/command/CommandHooks";
@@ -13,8 +19,37 @@ public final class CoreModule implements SplintModule {
     @Override
     public String id() { return "core"; }
 
+    private static final String BUCKET = "zombie/MovingObjectUpdateSchedulerUpdateBucket";
+    private static final String MOVING = "zombie/iso/IsoMovingObject";
+    private static final String ISOLATION = "splint/core/isolate/Isolation";
+
     @Override
-    public String description() { return "heartbeat, logging, incident history, /splint command"; }
+    public String description() { return "heartbeat, logging, incidents, per-object update isolation, /splint command"; }
+
+    /**
+     * The scheduler calls preupdate, frameStep and update, then postupdate, on every moving
+     * object with nothing around them: one throw abandons the rest of the frame. Each call goes
+     * through {@link splint.core.isolate.Isolation} instead.
+     */
+    @Override
+    public List<CallSite> callSites() {
+        return List.of(
+                new CallSite(BUCKET, "update", "(I)V", MOVING, "preupdate", "()V", ISOLATION, "preupdate"),
+                new CallSite(BUCKET, "update", "(I)V", MOVING, "frameStep", "()V", ISOLATION, "frameStep"),
+                new CallSite(BUCKET, "update", "(I)V", MOVING, "update", "()V", ISOLATION, "update"),
+                new CallSite(BUCKET, "postupdate", "(I)V", MOVING, "postupdate", "()V", ISOLATION, "postupdate"));
+    }
+
+    /** Per-object breaker state (see Breaker). */
+    @Override
+    public List<Field> fields() {
+        return List.of(new Field(MOVING, splint.core.isolate.Breaker.FIELD, "Ljava/lang/Object;"));
+    }
+
+    @Override
+    public List<ModuleCommand> commands() { return COMMANDS; }
+
+    private static final List<ModuleCommand> COMMANDS = List.of(new splint.core.isolate.FrozenCommand());
 
     @Override
     public List<Patch> patches() {

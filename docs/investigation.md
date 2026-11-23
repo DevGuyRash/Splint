@@ -55,13 +55,13 @@ Lab, one water ghost, vanilla server:
 
 This matches the report's "no players can take any actions… endurance and thirst/hunger stop changing… no timed actions work… everything is in limbo", and "even where no one is".
 
-### 5. The report's stack: growth beside a ghost (code; lab scenario `grow-near-ghost`)
+### 5. The report's stack: growth beside a ghost (reproduced: `grow-near-ghost`, `grow-near-invalid-ghost`)
 
 When a juvenile within 4 squares of a ghost reaches its growth age, `grow` constructs the next stage. The constructor's duplicate check compares -1 with -1, matches the ghost, and calls `delete()` on the new, uninitialised animal. `delete` → `removeFromWorld` → `IsoGameCharacter.removeFromWorld` → `releaseRagdollController` → `getAnimationPlayer` → `ModelManager.getBodyModel` → `AnimalVisual.getModelTest` reads `AnimalDefinitions.getDef(null).textureSkinned` and throws. That is the report's exact frame sequence. `IsoMovingObject.removeFromWorld` had already taken the object out of the update list, but `delete` never reaches `removeFromSquare()`. So the failed new stage stays on the square as a ghost, the parent is unchanged, and the growth repeats next frame.
 
-### 6. `getAttachedTree` on null data (code)
+### 6. `getAttachedTree` on null data (reproduced: `unload-with-ghost`)
 
-`IsoAnimal.unloaded()` calls `getData().getAttachedTree()` (IsoAnimal.java:1652). Chunk unload (`AnimalPopulationManager.removeChunkFromWorld`) calls it for every animal on the chunk's squares, ghosts included, giving exactly "Cannot invoke AnimalData.getAttachedTree() because IsoAnimal.getData() is null". In vanilla that exception is caught at chunk level after it has skipped the rest of that chunk's population bookkeeping. The square-only ghosts left by finding 5 are the ones that reach it. So the report's two signatures are consistent with one ghost population: `textureSkinned` while juveniles keep trying to grow, and `getAttachedTree` when their chunks unload.
+`IsoAnimal.unloaded()` calls `getData().getAttachedTree()` (IsoAnimal.java:1652). Chunk unload (`AnimalPopulationManager.removeChunkFromWorld`) calls it for every animal on the chunk's squares, ghosts included, giving exactly "Cannot invoke AnimalData.getAttachedTree() because IsoAnimal.getData() is null". In vanilla that exception is caught at chunk level after it has skipped the rest of that chunk's population bookkeeping. The square-only ghosts left by finding 5 are the ones that reach it. So the report's two signatures are consistent with one ghost population: `textureSkinned` while juveniles keep trying to grow, and `getAttachedTree` when their chunks unload. The lab's `unload-with-ghost` run produced exactly that pair, 723 of each, once per retried unload of the ghost's chunk.
 
 ### 7. Vanilla `remove animals` from the console does nothing (reproduced)
 
@@ -86,7 +86,21 @@ So a server on "Very Fast" ages every animal 10×, everywhere. Nothing is extra 
 - **Trailer:** juveniles in a livestock trailer grow in place and keep their IDs (`replaceGrownAnimalInTrailer`). The next stage is still constructed at the trailer animal's stored coordinates first, so the constructor's water and duplicate checks run there. Unloading a trailer constructs the animal at the trailer's "AnimalEntry" area, another spot that can be a water square.
 - **Inventory:** see the open questions.
 
-### 10. Lab scenarios
+### 10. Duplicate IDs also lose animals when a chunk unloads (code; lab `legacy-dup-reload`)
+
+When a chunk unloads, its animals join virtual herds in the population worker. `AnimalManagerWorker.addAnimal` (AnimalManagerWorker.java ~197-219) removes any joining animal whose ID already exists in the herd, logging only at debug level ("Trying to add an animal with an existing IsoAnimal.animalID"). Two same-ID animals near each other therefore become one the next time nobody is around. This is a second silent loss path, independent of growth (finding 2).
+
+### 11. How Splint answers each finding
+
+| Finding | Splint change |
+|---|---|
+| 1 random IDs | `Rand.Next(10000)` in `IsoAnimal.init` is replaced in place by a per-world allocator (unique, monotonic, persisted in blocks). A primitive `int` → weak-reference hash index of live animals answers "who has this ID" in O(1). |
+| 2, 10 duplicate loss | Duplicates are refused in `setAnimalID`, re-assigned when an animal enters the world, and fixed before its chunk unloads. Growth hands the parent's ID to its next stage explicitly; nothing is deleted over an ID. |
+| 3 ghosts | Animals created on water are moved to land. Ghosts found on update, at chunk unload, at save, or beside a growing animal are removed with a removal that cannot throw. The constructor's duplicate check no longer runs before the ID exists. |
+| 4, 5, 6 limbo | Every animal update, sound update and hutch update is isolated: a failure is logged with location and players, and the animal is frozen with back-off after 3 failures in a row instead of aborting the world update. |
+| 7 `remove animals` | `/splint animals kill` with combinable selections (cell, area, player, hutch, trailer, inventory, type, stage, sex, age, place, ghosts, frozen, duplicates), dry run by default. |
+
+### 12. Lab scenarios
 
 Each scenario runs in a fresh session. Results: `vanilla` without Splint, `splint` with it.
 

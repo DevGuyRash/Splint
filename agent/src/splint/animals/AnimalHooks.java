@@ -9,6 +9,7 @@ import java.util.List;
 import splint.core.log.Incidents;
 import splint.core.log.Log;
 import splint.core.Threads;
+import splint.core.isolate.Breaker;
 import splint.core.patch.Originals;
 import splint.core.world.World;
 import zombie.characters.animals.IsoAnimal;
@@ -286,30 +287,34 @@ public final class AnimalHooks {
 
     // --- per-animal isolation (hot path) ------------------------------------------------------
 
+    /**
+     * Ghosts are removed on their first update. Failures are contained by the core breaker; the
+     * scheduler path is also isolated by the core, but trailers and inventories update their
+     * animals directly, so the hook contains failures itself.
+     */
     public static void update(IsoAnimal self) {
         if (AnimalOps.isGhost(self) && !self.isOnHook()) {
             AnimalOps.removeGhost(self, "update");
             return;
         }
-        if (Quarantine.isFrozen(self)) return;
+        if (Breaker.frozen(self)) return;
         try {
             Update.H.invokeExact(self);
-            Quarantine.succeeded(self);
         } catch (VirtualMachineError e) {
             throw e;
         } catch (Throwable t) {
-            Quarantine.failed(self, "update", t);
+            Breaker.failed(self, "update", t);
         }
     }
 
     public static void updateLoopingSounds(IsoAnimal self) {
-        if (AnimalOps.isGhost(self) || Quarantine.isFrozen(self)) return;
+        if (AnimalOps.isGhost(self) || Breaker.frozen(self)) return;
         try {
             Sounds.H.invokeExact(self);
         } catch (VirtualMachineError e) {
             throw e;
         } catch (Throwable t) {
-            Quarantine.failed(self, "updateLoopingSounds", t);
+            Breaker.failed(self, "updateLoopingSounds", t);
         }
     }
 

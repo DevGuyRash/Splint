@@ -12,7 +12,6 @@ final class AnimalStats {
     static final AtomicLong GHOSTS_PREVENTED = c("ghostsPrevented");
     static final AtomicLong GHOSTS_REMOVED = c("ghostsRemoved");
     static final AtomicLong WATER_RELOCATIONS = c("waterRelocations");
-    static final AtomicLong UPDATE_FAILURES = c("updateFailuresContained");
     static final AtomicLong REMOVAL_FAILURES = c("removalFailuresContained");
     static final AtomicLong HUTCH_FAILURES = c("hutchFailuresContained");
     static final AtomicLong KILLED_BY_COMMAND = c("killedByCommand");

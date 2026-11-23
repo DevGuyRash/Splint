@@ -19,6 +19,7 @@ public final class Splint {
     /** Called once per world update on the main thread (see CoreHooks.worldUpdate). */
     public static void tick() {
         Threads.drain();
+        splint.core.isolate.Breaker.nextFrame();
         long now = System.currentTimeMillis();
         if (!started) {
             started = true;

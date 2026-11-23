@@ -14,6 +14,7 @@ import splint.core.command.Args;
 import splint.core.command.CommandContext;
 import splint.core.command.ModuleCommand;
 import splint.core.command.Usage;
+import splint.core.isolate.Breaker;
 import splint.core.log.Log;
 import splint.core.world.World;
 import zombie.characters.animals.IsoAnimal;
@@ -76,7 +77,7 @@ final class AnimalCommands implements ModuleCommand {
 
     private static String line(Found f) {
         IsoAnimal a = f.animal();
-        String frozen = Quarantine.isFrozen(a) ? " FROZEN(" + Quarantine.lastError(a) + ")" : "";
+        String frozen = Breaker.frozen(a) ? " FROZEN(" + Breaker.lastError(a) + ")" : "";
         String stage = AnimalOps.isGhost(a) ? "" : AnimalOps.isJuvenile(a) ? " baby" : " adult";
         return AnimalOps.brief(a) + stage + " - " + where(f) + frozen;
     }
@@ -96,7 +97,7 @@ final class AnimalCommands implements ModuleCommand {
                 ids.merge(a.getAnimalID(), 1, Integer::sum);
                 if (AnimalOps.isJuvenile(a)) babies++;
             }
-            if (Quarantine.isFrozen(a)) frozen++;
+            if (Breaker.frozen(a)) frozen++;
             byPlace.merge(f.place(), 1, Integer::sum);
             byCell.computeIfAbsent(f.cellX() + "," + f.cellY(), k -> new TreeMap<>())
                     .merge(ghost ? "GHOST" : a.getAnimalType(), 1, Integer::sum);
@@ -218,9 +219,15 @@ final class AnimalCommands implements ModuleCommand {
         return b == null ? List.of() : new ArrayList<>(b);
     }
 
+    static List<IsoAnimal> frozenAnimals() {
+        List<IsoAnimal> out = new ArrayList<>();
+        for (var o : Breaker.frozenObjects()) if (o instanceof IsoAnimal an) out.add(an);
+        return out;
+    }
+
     private static String frozen(Args a, CommandContext ctx) {
         boolean confirm = a.confirmed();
-        List<IsoAnimal> frozen = Quarantine.frozen();
+        List<IsoAnimal> frozen = frozenAnimals();
         if (frozen.isEmpty()) return "No frozen animals.";
         String action = a.more() ? a.lower() : "list";
         Map<IsoAnimal, Found> places = new IdentityHashMap<>();
@@ -229,8 +236,8 @@ final class AnimalCommands implements ModuleCommand {
             case "release" -> {
                 if (!confirm) return "Dry run: would release " + frozen.size() + " frozen animals. Add 'confirm'.";
                 ctx.requireMainThread();
-                frozen.forEach(Quarantine::release);
-                ctx.audit("frozen release: " + frozen.size());
+                frozen.forEach(Breaker::release);
+                ctx.audit("frozen animals release: " + frozen.size());
                 return "Released " + frozen.size() + " animals; they will be updated again.";
             }
             case "kill" -> {
@@ -241,7 +248,7 @@ final class AnimalCommands implements ModuleCommand {
                     Found f = places.getOrDefault(an, new Found(an, Place.WORLD, null, (int) an.getX(), (int) an.getY(), (int) an.getZ()));
                     ctx.audit("frozen kill: " + AnimalOps.describe(an));
                     if (AnimalOps.kill(f) == null) n++;
-                    Quarantine.release(an);
+                    Breaker.release(an);
                 }
                 return "Removed " + n + " frozen animals.";
             }

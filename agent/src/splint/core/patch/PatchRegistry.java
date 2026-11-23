@@ -33,6 +33,7 @@ public final class PatchRegistry {
         Map<String, List<Patch>> patches = new HashMap<>();
         Map<String, List<Redirect>> redirects = new HashMap<>();
         Map<String, List<Patcher.Field>> fields = new HashMap<>();
+        Map<String, List<Patcher.CallSite>> sites = new HashMap<>();
         for (SplintModule m : modules) {
             for (Patch p : m.patches()) {
                 DECLARED.add(new Declared(m.id(), p.owner(), p.owner() + "." + p.name() + p.descriptor()));
@@ -42,6 +43,10 @@ public final class PatchRegistry {
                 DECLARED.add(new Declared(m.id(), r.owner(), r.key()));
                 redirects.computeIfAbsent(r.owner(), k -> new ArrayList<>()).add(r);
             }
+            for (Patcher.CallSite c : m.callSites()) {
+                DECLARED.add(new Declared(m.id(), c.owner(), c.key()));
+                sites.computeIfAbsent(c.owner(), k -> new ArrayList<>()).add(c);
+            }
             for (Patcher.Field f : m.fields()) {
                 DECLARED.add(new Declared(m.id(), f.owner(), f.key()));
                 fields.computeIfAbsent(f.owner(), k -> new ArrayList<>()).add(f);
@@ -50,6 +55,7 @@ public final class PatchRegistry {
         Set<String> targets = new java.util.HashSet<>(patches.keySet());
         targets.addAll(redirects.keySet());
         targets.addAll(fields.keySet());
+        targets.addAll(sites.keySet());
         for (Class<?> c : inst.getAllLoadedClasses()) {
             String n = c.getName().replace('.', '/');
             if (targets.contains(n)) {
@@ -65,11 +71,12 @@ public final class PatchRegistry {
                 List<Patch> ps = patches.getOrDefault(name, List.of());
                 List<Redirect> rs = redirects.getOrDefault(name, List.of());
                 List<Patcher.Field> fs = fields.getOrDefault(name, List.of());
-                if (ps.isEmpty() && rs.isEmpty() && fs.isEmpty()) return null;
+                List<Patcher.CallSite> cs = sites.getOrDefault(name, List.of());
+                if (ps.isEmpty() && rs.isEmpty() && fs.isEmpty() && cs.isEmpty()) return null;
                 LOADED.add(name);
                 byte[] out;
                 try {
-                    out = Patcher.apply(bytes, ps, rs, fs, APPLIED);
+                    out = Patcher.apply(bytes, ps, rs, fs, cs, APPLIED);
                 } catch (Throwable t) {
                     // Never take the game down over a patch: that class runs unpatched.
                     Log.boot("could not patch " + name + "; running it unpatched", t);
@@ -77,7 +84,7 @@ public final class PatchRegistry {
                 }
                 // The JVM discards a transformer's result if it throws, so report only
                 // through the boot log, which cannot throw or call back into game code.
-                Log.boot("patched " + name.replace('/', '.') + " (" + (ps.size() + rs.size() + fs.size()) + " change(s))", null);
+                Log.boot("patched " + name.replace('/', '.') + " (" + (ps.size() + rs.size() + fs.size() + cs.size()) + " change(s))", null);
                 return out;
             }
         });

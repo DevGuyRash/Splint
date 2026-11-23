@@ -8,7 +8,6 @@ import splint.animals.AnimalOps.Place;
 import splint.core.command.ModuleCommand;
 import splint.core.module.SplintModule;
 import splint.core.patch.Patcher.Patch;
-import splint.core.patch.Patcher.Field;
 import splint.core.patch.Patcher.Redirect;
 import zombie.characters.IsoPlayer;
 
@@ -61,11 +60,15 @@ public final class AnimalsModule implements SplintModule {
             new Redirect(ANIMAL, "init", "(Lzombie/characters/animals/datas/AnimalBreed;)V",
                     "zombie/core/random/Rand", "Next", "(I)I", "animalId", "splint/animals/AnimalIds", "next", true));
 
-    /** Per-animal state (failure tracking), read on every update as a plain field. */
-    static final String STATE_FIELD = "splint$animals";
-    private static final List<Field> FIELDS = List.of(new Field(ANIMAL, STATE_FIELD, "Ljava/lang/Object;"));
 
     private static final List<ModuleCommand> COMMANDS = List.of(new AnimalCommands());
+
+    public AnimalsModule() {
+        // By name: this runs in premain, before IsoAnimal may be loaded (it must load patched).
+        splint.core.isolate.Describers.register(ID, "zombie.characters.animals.IsoAnimal",
+                o -> AnimalOps.describe((zombie.characters.animals.IsoAnimal) o),
+                o -> AnimalOps.brief((zombie.characters.animals.IsoAnimal) o));
+    }
 
     @Override
     public String id() { return ID; }
@@ -82,14 +85,11 @@ public final class AnimalsModule implements SplintModule {
     public List<Redirect> redirects() { return REDIRECTS; }
 
     @Override
-    public List<Field> fields() { return FIELDS; }
-
-    @Override
     public List<ModuleCommand> commands() { return COMMANDS; }
 
     @Override
     public String status() {
-        return "animals: " + AnimalIds.status() + " indexedIds=" + AnimalIndex.size() + " frozen=" + Quarantine.frozen().size();
+        return "animals: " + AnimalIds.status() + " indexedIds=" + AnimalIndex.size() + " frozen=" + AnimalCommands.frozenAnimals().size();
     }
 
     /** Loaded animals within 30 squares of each player, by place: one scan for all players. */

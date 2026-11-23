@@ -10,6 +10,8 @@ public class VerifyPatches {
     public static void main(String[] a) throws Exception {
         Map<String, List<Patcher.Patch>> patches = new TreeMap<>();
         Map<String, List<Patcher.Redirect>> redirects = new TreeMap<>();
+        Map<String, List<Patcher.Field>> fields = new TreeMap<>();
+        Map<String, List<Patcher.CallSite>> sites = new TreeMap<>();
         List<String> expected = new ArrayList<>();
         for (SplintModule m : ServiceLoader.load(SplintModule.class)) {
             for (var p : m.patches()) {
@@ -20,10 +22,21 @@ public class VerifyPatches {
                 redirects.computeIfAbsent(r.owner(), k -> new ArrayList<>()).add(r);
                 expected.add(r.key());
             }
-            System.out.println("module " + m.id() + ": " + m.patches().size() + " patches, " + m.redirects().size() + " redirects");
+            for (var f : m.fields()) {
+                fields.computeIfAbsent(f.owner(), k -> new ArrayList<>()).add(f);
+                expected.add(f.key());
+            }
+            for (var c : m.callSites()) {
+                sites.computeIfAbsent(c.owner(), k -> new ArrayList<>()).add(c);
+                expected.add(c.key());
+            }
+            System.out.println("module " + m.id() + ": " + m.patches().size() + " patches, " + m.redirects().size() + " redirects, "
+                    + m.fields().size() + " fields, " + m.callSites().size() + " call sites");
         }
         Set<String> owners = new TreeSet<>(patches.keySet());
         owners.addAll(redirects.keySet());
+        owners.addAll(fields.keySet());
+        owners.addAll(sites.keySet());
         Set<String> applied = new TreeSet<>();
         int bad = 0;
         try (ZipFile zip = new ZipFile(a[0])) {
@@ -31,7 +44,9 @@ public class VerifyPatches {
                 var entry = zip.getEntry(owner + ".class");
                 if (entry == null) { System.out.println("NO CLASS " + owner); bad++; continue; }
                 byte[] in = zip.getInputStream(entry).readAllBytes();
-                byte[] out = Patcher.apply(in, patches.getOrDefault(owner, List.of()), redirects.getOrDefault(owner, List.of()), applied);
+                byte[] out = Patcher.apply(in, patches.getOrDefault(owner, List.of()), redirects.getOrDefault(owner, List.of()),
+                        fields.getOrDefault(owner, List.of()), sites.getOrDefault(owner, List.of()), applied);
+                if (out == null) { System.out.println("NOTHING TO APPLY " + owner); bad++; continue; }
                 var errors = ClassFile.of().verify(out);
                 System.out.println(owner + ": " + in.length + " -> " + out.length + " bytes, verify errors=" + errors.size());
                 for (var err : errors) { System.out.println("   " + err.getMessage()); bad++; }
@@ -60,6 +75,13 @@ public class VerifyPatches {
                     type = java.lang.constant.MethodTypeDesc.of(type.returnType(), params.toArray(java.lang.constant.ClassDesc[]::new));
                 }
                 bad += checkStatic(r.newOwner(), r.newName(), type);
+            }
+            for (var c : m.callSites()) {
+                var type = java.lang.constant.MethodTypeDesc.ofDescriptor(c.callDesc());
+                var params = new ArrayList<java.lang.constant.ClassDesc>();
+                params.add(java.lang.constant.ClassDesc.ofInternalName(c.callOwner()));
+                params.addAll(type.parameterList());
+                bad += checkStatic(c.newOwner(), c.newName(), java.lang.constant.MethodTypeDesc.of(type.returnType(), params.toArray(java.lang.constant.ClassDesc[]::new)));
             }
         }
         System.out.println(applied.size() + " of " + expected.size() + " patches applied");

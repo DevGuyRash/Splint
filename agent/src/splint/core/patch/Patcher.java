@@ -72,6 +72,18 @@ public final class Patcher {
         public String key() { return owner + "." + method + methodDesc + "@" + callOwner + "." + callName; }
     }
 
+    /**
+     * Inside {@code owner.method}, replaces every {@code invokevirtual callOwner.callName callDesc}
+     * with {@code invokestatic newOwner.newName}, whose descriptor takes the receiver first:
+     * {@code (LcallOwner;A...)R}. The stack is unchanged, so this needs no lookahead. Used to
+     * wrap calls a game loop makes on each object (the update scheduler) without patching every
+     * subclass that overrides them.
+     */
+    public record CallSite(String owner, String method, String methodDesc, String callOwner, String callName, String callDesc,
+                           String newOwner, String newName) {
+        public String key() { return owner + "." + method + methodDesc + "->" + callOwner + "." + callName + callDesc; }
+    }
+
     /** A public field Splint adds to a game class (see {@code splint.core.ObjectSlot}). */
     public record Field(String owner, String name, String descriptor) {
         public String key() { return owner + "#" + name; }
@@ -90,24 +102,31 @@ public final class Patcher {
      */
     public static byte[] apply(byte[] classBytes, List<Patch> patches, List<Redirect> redirects, List<Field> fields,
                                Set<String> applied) {
+        return apply(classBytes, patches, redirects, fields, List.of(), applied);
+    }
+
+    public static byte[] apply(byte[] classBytes, List<Patch> patches, List<Redirect> redirects, List<Field> fields,
+                               List<CallSite> callSites, Set<String> applied) {
         Set<String> done = new HashSet<>();
-        byte[] out = transform(classBytes, patches, redirects, fields, done);
+        byte[] out = transform(classBytes, patches, redirects, fields, callSites, done);
         if (out != null) applied.addAll(done);
         return out;
     }
 
     private static byte[] transform(byte[] classBytes, List<Patch> patches, List<Redirect> redirects, List<Field> fields,
-                                    Set<String> applied) {
+                                    List<CallSite> callSites, Set<String> applied) {
         ClassFile cf = ClassFile.of();
         ClassModel model = cf.parse(classBytes);
         Map<String, Patch> byKey = new java.util.HashMap<>();
         for (Patch p : patches) byKey.put(p.key(), p);
         Map<String, List<Redirect>> redirectsByMethod = new java.util.HashMap<>();
         for (Redirect r : redirects) redirectsByMethod.computeIfAbsent(r.method() + r.methodDesc(), k -> new ArrayList<>()).add(r);
+        Map<String, List<CallSite>> sitesByMethod = new java.util.HashMap<>();
+        for (CallSite c : callSites) sitesByMethod.computeIfAbsent(c.method() + c.methodDesc(), k -> new ArrayList<>()).add(c);
         Set<String> present = new HashSet<>();
         for (MethodModel m : model.methods()) {
             String key = m.methodName().stringValue() + m.methodType().stringValue();
-            if (byKey.containsKey(key) || redirectsByMethod.containsKey(key)) present.add(key);
+            if (byKey.containsKey(key) || redirectsByMethod.containsKey(key) || sitesByMethod.containsKey(key)) present.add(key);
         }
         if (present.isEmpty() && fields.isEmpty()) return null;
         ClassDesc owner = model.thisClass().asSymbol();
@@ -119,9 +138,12 @@ public final class Patcher {
             String key = method.methodName().stringValue() + method.methodType().stringValue();
             Patch patch = byKey.get(key);
             List<Redirect> rs = redirectsByMethod.get(key);
-            if (patch == null && rs != null) {
-                cb.transformMethod(method, java.lang.classfile.MethodTransform.transformingCode(
-                        java.lang.classfile.CodeTransform.ofStateful(() -> new RedirectCalls(rs, owner, applied))));
+            List<CallSite> cs = sitesByMethod.get(key);
+            if (patch == null && (rs != null || cs != null)) {
+                java.lang.classfile.CodeTransform code = java.lang.classfile.CodeTransform.ACCEPT_ALL;
+                if (rs != null) code = java.lang.classfile.CodeTransform.ofStateful(() -> new RedirectCalls(rs, owner, applied));
+                if (cs != null) code = code.andThen(new SiteCalls(cs, applied));
+                cb.transformMethod(method, java.lang.classfile.MethodTransform.transformingCode(code));
                 return;
             }
             if (patch == null) {
@@ -250,6 +272,29 @@ public final class Patcher {
         public void atEnd(java.lang.classfile.CodeBuilder b) {
             if (held != null) b.with(held);
             markers.forEach(b::with);
+        }
+    }
+
+    private record SiteCalls(List<CallSite> sites, Set<String> applied) implements java.lang.classfile.CodeTransform {
+        @Override
+        public void accept(java.lang.classfile.CodeBuilder b, java.lang.classfile.CodeElement e) {
+            if (e instanceof java.lang.classfile.instruction.InvokeInstruction inv
+                    && inv.opcode() == java.lang.classfile.Opcode.INVOKEVIRTUAL) {
+                for (CallSite c : sites) {
+                    if (inv.owner().asInternalName().equals(c.callOwner()) && inv.name().equalsString(c.callName())
+                            && inv.type().equalsString(c.callDesc())) {
+                        MethodTypeDesc t = inv.typeSymbol();
+                        List<ClassDesc> params = new ArrayList<>();
+                        params.add(ClassDesc.ofInternalName(c.callOwner()));
+                        params.addAll(t.parameterList());
+                        b.invokestatic(ClassDesc.ofInternalName(c.newOwner()), c.newName(),
+                                MethodTypeDesc.of(t.returnType(), params.toArray(ClassDesc[]::new)));
+                        applied.add(c.key());
+                        return;
+                    }
+                }
+            }
+            b.with(e);
         }
     }
 

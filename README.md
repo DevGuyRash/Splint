@@ -7,7 +7,7 @@ The first module, `animals`, targets the animal failure that leaves a multiplaye
 What it does today:
 
 - **Unique animal IDs, generated correctly.** Vanilla's only source of new animal IDs is `this.animalId = Rand.Next(10000)` in `IsoAnimal.init`: a random number from 0 to 9999 with no uniqueness check. A 460-animal test farm held 8 to 13 duplicate pairs. Splint replaces that expression with a per-world allocator: IDs start at 10000, only increase, and are persisted in the save in reserved blocks, so restarts and crashes never reuse one.
-- **O(1) duplicate checks.** Vanilla's duplicate check scans the 8×8 squares around every newly built animal, allocating a list per square, and cannot see a duplicate 5 squares away. Splint keeps an ID index, a primitive `int`-keyed open-addressing hash table with weak values, so every check is one lookup across the whole server. Duplicates are refused when set, repaired when an old save loads one, and fixed before a chunk unloads (vanilla's population worker silently drops an animal whose ID repeats there).
+- **O(1) duplicate checks.** Vanilla's duplicate check scans the 8×8 squares around every newly built animal, allocating a list per square, and cannot see a duplicate 5 squares away. Splint keeps an ID index, a primitive `int`-keyed open-addressing hash table with weak values, so every check is one lookup across the whole server. Duplicates are refused when set, repaired when an animal from an old save enters the world, and fixed before a chunk unloads (vanilla's population worker silently drops an animal whose ID repeats in the herd it joins).
 - **No half-built animals.** Vanilla can leave an animal with no type, data or ID in the world: when it is created on a water square, or with an unknown type, or by its own duplicate check. One such animal throws on every frame and stops the whole world update. Splint moves animals created on water to the nearest land, removes ghosts it finds, and makes animal removal always complete.
 - **Failure isolation.** An exception in one animal's update, sound update or hutch update is caught, logged with its location, and contained. The rest of the world keeps running. An animal that keeps failing is frozen in place and retried with back-off; admins can inspect, release or remove it.
 - **No silent animal loss.** When an animal grows next to another animal with the same ID, vanilla deletes both the animal and its next stage. Splint keeps both and gives the newcomer a fresh ID.
@@ -41,7 +41,7 @@ On a hosting panel that cannot edit `ProjectZomboid64.json` or the JVM arguments
 
 ## Commands
 
-From the console or RCON, drop the leading slash.
+From the console or RCON, drop the leading slash. In game, `/splint` needs the `ChangeAndReloadServerOptions` capability, which the default roles give to admins but not to moderators, because these commands remove animals and show every player's position. Replies go only to whoever ran the command.
 
 ```
 /splint status                       patch health, ID counter, counters since start
@@ -129,6 +129,8 @@ Scenarios include the report's exact stack (`grow-near-ghost`, `grow-near-invali
 
 ## Scope and limits
 
-- Server side only. Clients need nothing. Single-player and co-op hosts are not supported targets yet.
+- Install it on the dedicated server. On a multiplayer client the ID work stays off (the server owns animal IDs), and the safety fixes are harmless there, but nothing needs it client-side today. Single player and co-op hosts get the same fixes as a server; they are tested less.
 - Splint does not change animal behaviour, growth rates or sandbox settings.
-- Splint cannot repair animals that were never loaded, and it does not edit `apop` files.
+- Commands see what the server has in memory. Animals in areas nobody has loaded are not in memory; their duplicate IDs are fixed when they load or unload next.
+- A save written before Splint can contain duplicate IDs. They are repaired when those animals enter the world or right before their chunk unloads, which is before vanilla's population worker would drop one of a pair (`AnimalManagerWorker.addAnimal` discards an animal whose ID already exists in the herd it joins).
+- Splint never edits `apop` files or other save data directly.

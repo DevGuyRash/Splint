@@ -133,7 +133,7 @@ final class AnimalSelector {
                     s.filter(f -> AnimalOps.isGhost(f.animal()), "ghosts");
                     s.ghostScan = true;
                 }
-                case "frozen" -> s.filter(f -> Quarantine.isFrozen(f.animal()), "frozen");
+                case "frozen" -> s.filter(f -> splint.core.isolate.Breaker.frozen(f.animal()), "frozen");
                 case "dupes", "duplicates" -> {
                     s.onlyDupes = true;
                     s.labels.add("duplicate IDs");
