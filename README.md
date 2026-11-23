@@ -21,7 +21,7 @@ The full investigation, with the reproduced failures, is in [docs/investigation.
 
 Splint is a Java agent. It rewrites a short list of game methods in memory when the server starts and changes no game files. Workshop mods cannot install Java code, so it is installed once on the server machine.
 
-1. Copy `splint.jar` into the server's `java/` folder (next to `projectzomboid.jar`).
+1. Download `splint.jar` from the [latest release](https://github.com/DevGuyRash/Splint/releases/latest) (check it against `SHA256SUMS`, or build it yourself, see [Build](#build)) and copy it into the server's `java/` folder (next to `projectzomboid.jar`).
 2. Add `-javaagent:java/splint.jar` to the `vmArgs` list in `ProjectZomboid64.json` (tested on the Linux dedicated server; the Windows server reads the same file, but has not been tested).
 
    ```json
@@ -138,3 +138,7 @@ Scenarios include the report's exact stack (`grow-near-ghost`, `grow-near-invali
 - Commands see what the server has in memory. Animals in areas nobody has loaded are not in memory; their duplicate IDs are fixed when they load or unload next.
 - A save written before Splint can contain duplicate IDs. They are repaired when those animals enter the world or right before their chunk unloads, which is before vanilla's population worker would drop one of a pair (`AnimalManagerWorker.addAnimal` discards an animal whose ID already exists in the herd it joins).
 - Splint never edits `apop` files or other save data directly.
+
+## License
+
+MIT, see [LICENSE](LICENSE). Splint contains no game code; it is built against your own installed copy of Project Zomboid.
