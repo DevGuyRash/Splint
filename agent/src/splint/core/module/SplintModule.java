@@ -42,7 +42,11 @@ public interface SplintModule {
     /** Calls inside game methods to route through a static wrapper (e.g. per-object isolation). */
     default List<splint.core.patch.Patcher.CallSite> callSites() { return List.of(); }
 
-    /** Fields to add to game classes, for per-object state (see {@link splint.core.ObjectSlot}). */
+    /**
+     * Fields to add to game classes, for per-object state. Read them through a
+     * {@code static final} VarHandle with exact types (see {@link splint.core.isolate.Breaker}),
+     * which the JIT folds into a plain field access.
+     */
     default List<splint.core.patch.Patcher.Field> fields() { return List.of(); }
 
     /** Called once, on the main thread, at the first world update: runtime wiring goes here. */

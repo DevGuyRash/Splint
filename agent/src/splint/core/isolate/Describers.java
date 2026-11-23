@@ -6,13 +6,15 @@ import splint.core.world.World;
 import zombie.iso.IsoMovingObject;
 
 /**
- * How to name a game object in logs, incidents and command output. Modules register describers
- * for the classes they know (animals: type, ID, hutch, trailer...); anything else gets its class
- * and position. Only used when something went wrong or an admin asks.
+ * How to name a game object in logs, incidents and command output, and whether the circuit
+ * breaker may freeze it. Modules register in {@link splint.core.module.SplintModule#start}
+ * (never in premain) for the classes they own; anything else gets its class and position and
+ * is never frozen. Only consulted when something went wrong or an admin asks.
  */
 public final class Describers {
     /** {@code typeName} is a class name, not a Class: modules register in premain, before game classes may load. */
-    public record Describer(String module, String typeName, Function<Object, String> full, Function<Object, String> brief) {}
+    public record Describer(String module, String typeName, boolean freezable, Function<Object, String> full,
+                            Function<Object, String> brief) {}
 
     private static final CopyOnWriteArrayList<Describer> ALL = new CopyOnWriteArrayList<>();
     private static final ClassValue<Describer> FOR_CLASS = new ClassValue<>() {
@@ -28,9 +30,20 @@ public final class Describers {
 
     private Describers() {}
 
-    /** Registered from a module's constructor or premain-time setup. */
-    public static void register(String module, String className, Function<Object, String> full, Function<Object, String> brief) {
-        ALL.add(new Describer(module, className, full, brief));
+    /**
+     * Registers how to describe {@code className} and its subclasses, and whether the breaker may
+     * freeze them (only for objects the world can do without updating for a while). Call from
+     * {@code start()}: lookups are cached per class from the first failure on.
+     */
+    public static void register(String module, String className, boolean freezable, Function<Object, String> full,
+                                Function<Object, String> brief) {
+        ALL.add(new Describer(module, className, freezable, full, brief));
+    }
+
+    /** Whether the breaker may freeze {@code o}: only types a module opted in. */
+    public static boolean freezable(Object o) {
+        Describer d = FOR_CLASS.get(o.getClass());
+        return d != null && d.freezable();
     }
 
     /** The module that owns objects of this kind ("core" when none does). */

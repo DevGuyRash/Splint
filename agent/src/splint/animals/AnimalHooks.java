@@ -143,6 +143,13 @@ public final class AnimalHooks {
         if (other != null && other != self && AnimalIndex.isLive(other) && !sameIndividual(other, self)) {
             int fresh = AnimalIds.allocate();
             self.setAnimalID(fresh);                 // through the hook above: re-indexes self
+            java.util.List<IsoAnimal> babies = self.getBabies();
+            if (babies != null) {
+                for (IsoAnimal baby : babies) {      // babies find their mother by ID
+                    if (baby.motherId == id) baby.motherId = fresh;
+                    if (baby.attachBackToMother == id) baby.attachBackToMother = fresh;
+                }
+            }
             AnimalStats.DUPLICATE_IDS_FIXED.incrementAndGet();
             boolean full = Log.problem("duplicate-id", () -> "animal " + how + " with id " + id
                     + " that another live animal already has; gave it id " + fresh + ": " + AnimalOps.describe(self)
@@ -300,6 +307,7 @@ public final class AnimalHooks {
         if (Breaker.frozen(self)) return;
         try {
             Update.H.invokeExact(self);
+            Breaker.ok(self);                        // trailers and inventories have no postupdate
         } catch (VirtualMachineError e) {
             throw e;
         } catch (Throwable t) {

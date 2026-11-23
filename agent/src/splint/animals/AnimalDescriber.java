@@ -8,7 +8,8 @@ final class AnimalDescriber {
     private AnimalDescriber() {}
 
     static void register() {
-        Describers.register(AnimalsModule.ID, IsoAnimal.class.getName(),
+        // Freezable: a broken animal can stand still for a while; the world does not need it.
+        Describers.register(AnimalsModule.ID, IsoAnimal.class.getName(), true,
                 o -> AnimalOps.describe((IsoAnimal) o), o -> AnimalOps.brief((IsoAnimal) o));
     }
 }

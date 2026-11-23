@@ -23,7 +23,7 @@ The game only runs mod Lua in Kahlua, and these failures are in Java, outside an
 
 ## Keep it fast
 
-- Per-object, per-tick hooks may only do field reads and volatile reads on the normal path: no allocation, no locks, no hashing, no logging. `Quarantine.isFrozen` is a volatile read while nothing has failed.
+- Per-object, per-tick hooks may only do plain field reads on the normal path: no allocation, no locks, no hashing, no logging. Per-object state lives in a field the patcher adds, read through a `static final` VarHandle with exact types (`withInvokeExactBehavior`), which the JIT folds into a field access.
 - Lookups by ID go through hash structures with primitive keys (`IntWeakMap`), never square scans or boxed maps.
 - Expensive work (player lookups, `describe`, `Incidents.record`) runs only when something went wrong, or on an admin command.
 

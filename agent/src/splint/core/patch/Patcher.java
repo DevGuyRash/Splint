@@ -84,7 +84,7 @@ public final class Patcher {
         public String key() { return owner + "." + method + methodDesc + "->" + callOwner + "." + callName + callDesc; }
     }
 
-    /** A public field Splint adds to a game class (see {@code splint.core.ObjectSlot}). */
+    /** A public field Splint adds to a game class, for per-object state (see {@code splint.core.isolate.Breaker}). */
     public record Field(String owner, String name, String descriptor) {
         public String key() { return owner + "#" + name; }
     }

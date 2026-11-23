@@ -59,6 +59,8 @@ public final class CoreModule implements SplintModule {
         return List.of(
                 new Patch("zombie/iso/IsoWorld", "update", "()V", CORE_HOOKS, "worldUpdate"),
                 new Patch(COMMAND_BASE, "findCommandCls", "(Ljava/lang/String;)Ljava/lang/Class;", COMMAND_HOOKS, "findCommandCls"),
-                new Patch(COMMAND_BASE, "getSubClasses", "()[Ljava/lang/Class;", COMMAND_HOOKS, "getSubClasses"));
+                new Patch(COMMAND_BASE, "getSubClasses", "()[Ljava/lang/Class;", COMMAND_HOOKS, "getSubClasses"),
+                // Zombie objects are pooled and reused; a reused zombie starts with a clean breaker.
+                new Patch("zombie/characters/IsoZombie", "resetForReuse", "()V", CORE_HOOKS, "zombieReset"));
     }
 }
