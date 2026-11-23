@@ -38,6 +38,10 @@ class Session:
     evidence: Path
     proc: subprocess.Popen
     console: Path = field(init=False)
+    # Sessions resumed from this one's saved world (see restart()); stopped together with it.
+    children: list = field(default_factory=list)
+    # Server console size when the player was in the world (set by start()).
+    ready_offset: int = 0
 
     def __post_init__(self):
         self.console = self.evidence / "server-cache" / "server-console.txt"
@@ -355,7 +359,7 @@ def admin_commands(s: Session) -> dict:
 
 INVENTORY_ANIMALS = ("local p=SplintLabServer.player() local items=p:getInventory():getAllTypeRecurse('Animal') local out={} "
                      "for i=0,items:size()-1 do local a=items:get(i):getAnimal() "
-                     "out[#out+1]=(a and (tostring(a:getAnimalType())..'#'..a:getAnimalID()) or 'nil') end "
+                     "out[#out+1]=(a and (tostring(a:getAnimalType())..'#'..a:getAnimalID()..'/age='..(a:getData() and a:getData():getAge() or -1)) or 'nil') end "
                      "return 'items='..items:size()..' '..table.concat(out,',')")
 
 
@@ -512,6 +516,607 @@ def legacy_dup_reload(s: Session) -> dict:
             "exceptions": exceptions(s.log_since(off)), "lua_alive": heartbeat_alive(s)}
 
 
+# --- open questions: restarts, carried animals, trailers, Ovo Farms -----------------------
+
+OVO_FARMS = (3960, 10805)      # Ovo Farms, 1245 Payne Road, Echo Creek: three chicken ranch zones
+# Lua: juvenile `a` half an in-game day short of growing, so the game's own clock makes it grow.
+# The growth age comes from the running game's stage table for that animal's group and type, so
+# any species, mod or rebalance is handled without numbers in this file.
+NEAR_GROWTH = ("local st=AnimalDefinitions.stages[a:getAdef():getGroup()] st=st and st.stages[a:getAnimalType()] "
+               "local g=st and st.ageToGrow if g then a:getData():setAge(g-1) a:setHoursSurvived((g-1)*24+12) end ")
+
+
+def grows_at(s: Session, group: str, animal_type: str) -> int:
+    """Days until `animal_type` grows, from the running game's own definitions."""
+    return int(s.lua(f"return AnimalDefinitions.stages['{group}'].stages['{animal_type}'].ageToGrow").split()[-1])
+
+
+# The time chamber: how fast the lab runs the game's clock. Day length (real minutes per in-game
+# day, the sandbox DayLength setting) and the admin `settimespeed` multiplier (each tick simulates
+# more time, as fast-forward does) stack. Defaults come from the time-chamber probe; override with
+# SPLINT_LAB_MINUTES_PER_DAY / SPLINT_LAB_TIMESPEED.
+CHAMBER_MINUTES_PER_DAY = float(os.environ.get("SPLINT_LAB_MINUTES_PER_DAY", "1"))
+CHAMBER_TIMESPEED = float(os.environ.get("SPLINT_LAB_TIMESPEED", "20"))  # 7.7 in-game hours per real second, tick rate unchanged
+
+
+def set_time(s: Session, minutes_per_day: float, timespeed: float) -> None:
+    s.lua(f"getGameTime():setMinutesPerDay({minutes_per_day}) return 1")
+    console_reply(s, f"settimespeed {timespeed:g}", wait=2)
+
+
+def fast_time(s: Session, minutes_per_day: float | None = None, timespeed: float | None = None) -> float:
+    """Puts the server in the time chamber and returns the world age in hours at that moment,
+    so callers can report how far the clock moved. Days pass in seconds, so the player is made
+    invincible first: without food or water they would die within the scenario."""
+    s.lua("local p=SplintLabServer.player() if p then p:setGodMod(true) p:setInvincible(true) end return 1")
+    set_time(s, CHAMBER_MINUTES_PER_DAY if minutes_per_day is None else minutes_per_day,
+             CHAMBER_TIMESPEED if timespeed is None else timespeed)
+    return world_hours(s)
+
+
+def world_hours(s: Session, timeout: float = 60) -> float:
+    return float(s.lua("return getGameTime():getWorldAgeHours()", timeout).split()[-1])
+
+
+def wait_game_hours(s: Session, hours: float, timeout: float = 900) -> dict:
+    """Waits until `hours` of in-game time have passed (not a fixed number of real seconds), so a
+    faster chamber shortens every scenario. The chamber is on only for the wait itself: travel,
+    unloading and measurements run at normal speed, so no more in-game time passes than asked
+    for. Gives up after `timeout` real seconds, or as soon as the world update stops (the clock
+    cannot be read once server Lua no longer runs)."""
+    t0 = time.time()
+    try:
+        h0 = fast_time(s)
+    except SystemExit:
+        return {"game_hours": 0.0, "real_seconds": 0.0, "clock_readable": False}
+    h = h0
+    readable = True
+    while time.time() - t0 < timeout:
+        time.sleep(1)
+        try:
+            h = world_hours(s, timeout=30)
+        except SystemExit:
+            readable = False
+            break
+        if h - h0 >= hours:
+            break
+    if readable:
+        set_time(s, 60, 1)
+    return {"game_hours": round(h - h0, 1), "real_seconds": round(time.time() - t0), "clock_readable": readable}
+
+# Every animal in the server's update list that carries `id`: type, square, whether it has data.
+WHERE_ID = ("local function where(id) local l=getCell():getObjectListForLua() local out={} for i=0,l:size()-1 do "
+            "local o=l:get(i) if instanceof(o,'IsoAnimal') and o:getAnimalID()==id then "
+            "out[#out+1]=tostring(o:getAnimalType())..'@'..math.floor(o:getX())..','..math.floor(o:getY())"
+            "..' square='..tostring(o:getCurrentSquare()~=nil)..' data='..tostring(o:getData()~=nil) end end "
+            "return #out..' '..table.concat(out,';') end ")
+# Half-built animals anywhere in the update list (the census only sees squares near a point).
+LIST_GHOSTS = ("local n=0 local l=getCell():getObjectListForLua() for i=0,l:size()-1 do local o=l:get(i) "
+               "if instanceof(o,'IsoAnimal') and (o:getAnimalID()==-1 or o:getData()==nil or o:getAnimalType()==nil) "
+               "then n=n+1 end end return n")
+# The first livestock trailer the server knows about (restarts lose Lua references).
+TRAILER = ("local function trailer() local it=getCell():getVehicles():iterator() while it:hasNext() do local v=it:next() "
+           "if string.contains(v:getScriptName(), 'Trailer_Livestock') then return v end end end ")
+TRAILER_LIST = (TRAILER + "local v=trailer() if not v then return 'no trailer' end local out={} "
+                "for i=0,v:getAnimals():size()-1 do local a=v:getAnimals():get(i) "
+                "out[#out+1]=tostring(a:getAnimalType())..'#'..a:getAnimalID()..'/age='..(a:getData() and a:getData():getAge() or -1) end "
+                "return #out..' '..table.concat(out,',')")
+
+
+def restart(s: Session, agent: str | None | bool = True) -> tuple[Session, dict]:
+    """Saves the world through the server's own `quit` and starts a new session on that save, as
+    a restart (or a rollback to the latest save) does on a live server. The player logs back in
+    as the same character. `agent=True` keeps the first session's agent; a path or None picks."""
+    off = s.log_size()
+    server_log = s.evidence / "server.log"
+    log_off = server_log.stat().st_size
+    quit_out = subprocess.run([sys.executable, str(LAB / "splintlab.py"), "quit", str(s.evidence)],
+                              capture_output=True, text=True, timeout=1200).stdout.strip().splitlines()
+    s.proc.wait(timeout=120)
+    with server_log.open(errors="replace") as f:
+        f.seek(log_off)
+        stderr_tail = f.read()
+    saving = {"quit": quit_out[-1] if quit_out else "unknown", "exceptions_while_saving": exceptions(s.log_since(off)),
+              "worker_thread_died": "Exception in thread" in stderr_tail}
+    chosen = json.loads((s.evidence / "session.json").read_text()).get("agent") if agent is True else agent
+    s2 = start(s.evidence.with_name(s.evidence.name + "-resumed"), chosen or None, resume=s.evidence)
+    s.children.append(s2)
+    return s2, saving
+
+
+def after_login(s: Session, x: int, y: int, r: int = 12) -> dict:
+    """What a resumed session looks like once the player is back: is the world update running,
+    where is the player, what is on the squares around (x, y), anything thrown since start."""
+    out: dict = {"lua_alive": heartbeat_alive(s, wait=20)}
+    if out["lua_alive"]:
+        out["player_at"] = here(s)
+        out["census"] = census(s, x, y, r)
+        out["ghosts_in_update_list"] = s.lua(LIST_GHOSTS).split()[-1]
+    # From the moment the player was back in the world: boot noise (optional mod folders, the
+    # fixture polling before a player exists) is not part of the result.
+    out["exceptions_since_login"] = exceptions(s.log_since(s.ready_offset))
+    return out
+
+
+def _ghost_then_restart(s: Session, agent: str | None | bool) -> dict:
+    s.tp(*LAKE_SHORE)
+    s.server("spawn hen - 6 -3 0 1 30")
+    before = census(s, LAKE_SHORE[0], LAKE_SHORE[1], 12)
+    off = s.log_size()
+    s.lua(f"local d=AnimalDefinitions.getDef('hen') addAnimal(getCell(),{LAKE_WATER[0]},{LAKE_WATER[1]},0,'hen',d:getRandomBreed()) return 1")
+    time.sleep(15)
+    first = {"before": before, "lua_alive": heartbeat_alive(s), "exceptions": exceptions(s.log_since(off))}
+    # The `save` command (what periodic saves run) with the ghost still in the world.
+    save_off = s.log_size()
+    log_off = (s.evidence / "server.log").stat().st_size
+    s.console_cmd("save")
+    time.sleep(90)
+    with (s.evidence / "server.log").open(errors="replace") as f:
+        f.seek(log_off)
+        tail = f.read()
+    text = s.log_since(save_off)
+    # The console prints "World saved" as soon as the command is queued, before anything is
+    # written; only "Saving finish" means the save completed.
+    first["save_command"] = {"said_world_saved": "World saved" in text, "finished": "Saving finish" in text,
+                             "exceptions": exceptions(text),
+                             "save_thread_died": "Exception in thread" in tail or "Exception in thread" in text,
+                             "server_still_running": Path(f"/proc/{json.loads((s.evidence / 'session.json').read_text())['server_pid']}").exists()}
+    s2, saving = restart(s, agent)
+    return {"first_session": first, "save_and_quit": saving,
+            "resumed_agent": json.loads((s2.evidence / "session.json").read_text()).get("agent"),
+            "after_restart": after_login(s2, *LAKE_SHORE)}
+
+
+def ghost_save_restart(s: Session) -> dict:
+    """Open question: did the rollback help by changing the save, or only by restarting? A ghost
+    is in the world (world update stopped on vanilla), the server saves and quits, and the same
+    world starts again: does the ghost come back, does the save break?"""
+    return _ghost_then_restart(s, True)
+
+
+def ghost_save_splint_resume(s: Session) -> dict:
+    """A world saved by vanilla while a ghost was in it, started again with Splint installed (what
+    an admin does when they install Splint on a server that already has the problem). Run without
+    --agent: the second session always loads dist/splint.jar."""
+    return _ghost_then_restart(s, str(LAB.parent / "dist" / "splint.jar"))
+
+
+def pocket_far_growth(s: Session) -> dict:
+    """Open question: where does a carried juvenile end up when it grows? The chick is picked up
+    at one spot and grows after the player has gone far enough for that spot to unload."""
+    x, y = fresh_spot(s, -120)
+    cid = s.lua("local p=SplintLabServer.player() local cd=AnimalDefinitions.getDef('chick') "
+                "local c=addAnimal(getCell(),math.floor(p:getX())+2,math.floor(p:getY()),0,'chick',cd:getRandomBreed()) c:addToWorld() "
+                "local item=instanceItem('Base.Animal') item:setAnimal(c) c:removeFromWorld() c:removeFromSquare() "
+                "p:getInventory():AddItem(item) SplintLabServer.pocket=c local a=c " + NEAR_GROWTH +
+                "return c:getAnimalID()").split()[-1]
+    s.tp(x + 2000, y, settle=60)
+    off = s.log_size()
+    clock = wait_game_hours(s, 60)          # 2.5 in-game days; the chick needed one
+    alive = heartbeat_alive(s)
+    away: dict = {"lua_alive": alive}
+    if alive:
+        away["clock"] = clock
+    if alive:
+        away.update(carried_age=s.lua("local c=SplintLabServer.pocket return 'age='..c:getData():getAge()..' hoursSurvived='"
+                                      "..math.floor(c:getHoursSurvived())"),
+                    inventory=s.lua(INVENTORY_ANIMALS), where=s.lua(WHERE_ID + f"return where({cid})"),
+                    ghosts_in_update_list=s.lua(LIST_GHOSTS).split()[-1], player_at=here(s))
+    s.tp(x, y, settle=40)
+    back: dict = {"lua_alive": heartbeat_alive(s)}
+    if back["lua_alive"]:
+        back.update(where=s.lua(WHERE_ID + f"return where({cid})"), census_at_pickup=census(s, x + 2, y, 10))
+    return {"chick_id": cid, "picked_up_at": [x + 2, y], "grew_while_away": away, "back_at_pickup": back,
+            "exceptions": exceptions(s.log_since(off))}
+
+
+def pocket_relog(s: Session) -> dict:
+    """The player logs out with a chick in their pocket and logs back in (here: the server
+    restarts and the player reconnects), then the chick reaches its growth age."""
+    x, y = fresh_spot(s, -120)
+    cid = s.lua("local p=SplintLabServer.player() local cd=AnimalDefinitions.getDef('chick') "
+                "local c=addAnimal(getCell(),math.floor(p:getX())+2,math.floor(p:getY()),0,'chick',cd:getRandomBreed()) c:addToWorld() "
+                "local item=instanceItem('Base.Animal') item:setAnimal(c) c:removeFromWorld() c:removeFromSquare() "
+                "p:getInventory():AddItem(item) local a=c " + NEAR_GROWTH + "return c:getAnimalID()").split()[-1]
+    before = s.lua(INVENTORY_ANIMALS)
+    s2, saving = restart(s)
+    login = after_login(s2, x, y)
+    out = {"chick_id": cid, "before": before, "save_and_quit": saving, "after_login": login}
+    if login["lua_alive"]:
+        out["inventory_after_login"] = s2.lua(INVENTORY_ANIMALS)
+        out["carried_animal_after_login"] = s2.lua(
+            "local p=SplintLabServer.player() local items=p:getInventory():getAllTypeRecurse('Animal') "
+            "if items:size()==0 then return 'none' end local a=items:get(0):getAnimal() if not a then return 'nil animal' end "
+            "return 'at='..math.floor(a:getX())..','..math.floor(a:getY())..','..math.floor(a:getZ())..' age='..a:getData():getAge()"
+            "..' container='..tostring(a:getContainer()~=nil)")
+        off = s2.log_size()
+        clock = wait_game_hours(s2, 60)     # 2.5 in-game days; the chick needed one
+        grown: dict = {"lua_alive": heartbeat_alive(s2)}
+        if grown["lua_alive"]:
+            grown.update(clock=clock, inventory=s2.lua(INVENTORY_ANIMALS),
+                         where=s2.lua(WHERE_ID + f"return where({cid})"),
+                         ghosts_in_update_list=s2.lua(LIST_GHOSTS).split()[-1])
+        grown["exceptions"] = exceptions(s2.log_since(off))
+        out["grew_after_login"] = grown
+        # Carried animals do not age, so a chick only grows in a pocket when it is already past its
+        # growth age (a hutch keeps chicks as chicks past it). After a relog the carried animal
+        # has no container, which changes grow()'s path: put it past its growth age and watch.
+        off = s2.log_size()
+        set_time(s2, 60, 1)
+        s2.lua("local p=SplintLabServer.player() local items=p:getInventory():getAllTypeRecurse('Animal') "
+               "for i=0,items:size()-1 do local a=items:get(i):getAnimal() if a then a:setHoursSurvived(400*24) a:getData():setAge(400) end end return 1")
+        time.sleep(30)
+        over: dict = {"lua_alive": heartbeat_alive(s2), "stats_frozen": stats_frozen(s2)}
+        if over["lua_alive"]:
+            over.update(inventory=s2.lua(INVENTORY_ANIMALS), where=s2.lua(WHERE_ID + f"return where({cid})"),
+                        animals_in_update_list=s2.lua(TOTAL_ANIMALS).split()[-1],
+                        ghosts_in_update_list=s2.lua(LIST_GHOSTS).split()[-1])
+            time.sleep(30)
+            over.update(where_30s_later=s2.lua(WHERE_ID + f"return where({cid})"),
+                        animals_in_update_list_30s_later=s2.lua(TOTAL_ANIMALS).split()[-1])
+        over["exceptions"] = exceptions(s2.log_since(off))
+        out["past_growth_age_after_login"] = over
+    return out
+
+
+def carcass_relog(s: Session) -> dict:
+    """'I butchered some chickens before I logged ... possibly a ghost chicken in my pocket': the
+    player carries chicken carcasses (as picked up from the ground) when they log out and back in."""
+    x, y = fresh_spot(s, 600)
+    s.server("spawn hen - 3 2 0 0 30")
+    killed = s.lua(f"local n=0 for _,a in ipairs(SplintLabServer.animalsOnSquares({x},{y},0,6)) do a:setHealth(0) n=n+1 end return n")
+    time.sleep(8)
+    carried = s.lua(f"local p=SplintLabServer.player() local n=0 for dx=-6,6 do for dy=-6,6 do "
+                    f"local sq=getCell():getGridSquare({x}+dx,{y}+dy,0) if sq then local bodies=sq:getDeadBodys() "
+                    "for i=bodies:size()-1,0,-1 do local b=bodies:get(i) if b:isAnimal() then local item=b:getItem() "
+                    "if item then p:getInventory():AddItem(item) sq:removeCorpse(b,false) b:invalidateCorpse() n=n+1 end end end end end end "
+                    "local items=p:getInventory():getItems() local names={} for i=0,items:size()-1 do names[#names+1]=items:get(i):getFullType() end "
+                    "return n..' '..table.concat(names,',')")
+    s2, saving = restart(s)
+    login = after_login(s2, x, y)
+    inventory = ("local p=SplintLabServer.player() local items=p:getInventory():getItems() local names={} "
+                 "for i=0,items:size()-1 do names[#names+1]=items:get(i):getFullType() end return table.concat(names,',')")
+    out = {"killed": killed, "carried": carried, "save_and_quit": saving, "after_login": login}
+    if login["lua_alive"]:
+        login["inventory"] = s2.lua(inventory)
+        # Carcasses rot with time; let two in-game days pass with them in the pocket.
+        off = s2.log_size()
+        clock = wait_game_hours(s2, 48)
+        later: dict = {"lua_alive": heartbeat_alive(s2)}
+        if later["lua_alive"]:
+            later.update(clock=clock, inventory=s2.lua(inventory),
+                         ghosts_in_update_list=s2.lua(LIST_GHOSTS).split()[-1])
+        later["exceptions"] = exceptions(s2.log_since(off))
+        out["two_days_later"] = later
+    return out
+
+
+def trailer_relog(s: Session) -> dict:
+    """'One person having found a trailer full of chickens and whenever they log on it comes
+    back': the player logs out next to a livestock trailer of chicks and hens, logs back in, and
+    the chicks reach their growth age."""
+    x, y = fresh_spot(s, -240)
+    made = s.lua(f"local tsq=getCell():getGridSquare({x}+8,{y}-8,0) local v=addVehicleDebug('Base.Trailer_Livestock',IsoDirections.N,nil,tsq) "
+                 "local cd,hd=AnimalDefinitions.getDef('chick'),AnimalDefinitions.getDef('hen') "
+                 f"for i=1,6 do local a=addAnimal(getCell(),{x}+8,{y}-8,0,'chick',cd:getRandomBreed()) " + NEAR_GROWTH +
+                 "v:addAnimalInTrailer(a) end "
+                 f"for i=1,2 do v:addAnimalInTrailer(addAnimal(getCell(),{x}+8,{y}-8,0,'hen',hd:getRandomBreed())) end "
+                 "return v:getAnimals():size()")
+    before = s.lua(TRAILER_LIST)
+    s2, saving = restart(s)
+    login = after_login(s2, x, y, 20)
+    out = {"made": made, "before": before, "save_and_quit": saving, "after_login": login}
+    if login["lua_alive"]:
+        out["trailer_after_login"] = s2.lua(TRAILER_LIST)
+        off = s2.log_size()
+        clock = wait_game_hours(s2, 60)     # 2.5 in-game days; the chicks needed one
+        grown: dict = {"lua_alive": heartbeat_alive(s2)}
+        if grown["lua_alive"]:
+            grown.update(clock=clock, trailer=s2.lua(TRAILER_LIST),
+                         census=census(s2, x, y, 20), ghosts_in_update_list=s2.lua(LIST_GHOSTS).split()[-1])
+        grown["exceptions"] = exceptions(s2.log_since(off))
+        out["grew_after_login"] = grown
+    return out
+
+
+def trailer_unload_water(s: Session) -> dict:
+    """Unloading a livestock trailer whose animal entry is over water: removeAnimalFromTrailer
+    builds the animal fresh at the trailer's AnimalEntry area (then copies the old one into it),
+    and ISRemoveAnimalFromTrailer adds it to the world."""
+    s.tp(*LAKE_SHORE)
+    # Candidate trailers on the last land columns, facing every way; a new vehicle only has its
+    # world position (and so its area centres) after a tick, so they are measured afterwards.
+    s.lua("SplintLabServer.cands={} for _,dir in ipairs({IsoDirections.E,IsoDirections.W,IsoDirections.N,IsoDirections.S}) do "
+          f"for _,dx in ipairs({{0,1,2,3}}) do local sq=getCell():getGridSquare({LAKE_SHORE[0]}+dx,{LAKE_SHORE[1]}+(#SplintLabServer.cands)*4-24,0) "
+          "if sq and not sq:isWaterSquare() then local v=addVehicleDebug('Base.Trailer_Livestock',dir,nil,sq) "
+          "if v then table.insert(SplintLabServer.cands,{v=v,dir=tostring(dir)}) end end end end return #SplintLabServer.cands")
+    time.sleep(5)
+    placed = s.lua(
+        "local out,keep={},nil for _,c in ipairs(SplintLabServer.cands) do local v=c.v local e=v:getAreaCenter('AnimalEntry') "
+        "local esq=e and getCell():getGridSquare(math.floor(e:getX()),math.floor(e:getY()),0) local water=esq and esq:isWaterSquare() "
+        "local vsq=v:getSquare() local onland=vsq and not vsq:isWaterSquare() "
+        "out[#out+1]=c.dir..'@'..math.floor(v:getX())..','..math.floor(v:getY())..'->'..(e and (math.floor(e:getX())..','..math.floor(e:getY())) or 'nil')"
+        "..(water and ' WATER' or '') if water and onland and not keep then keep=v end end "
+        "for _,c in ipairs(SplintLabServer.cands) do if c.v~=keep then c.v:permanentlyRemove() end end SplintLabServer.wt=keep "
+        "return (keep and 'entry over water; ' or 'none; ')..table.concat(out,' | ')")
+    if "entry over water" not in placed:
+        return {"placed": placed, "note": "no trailer placement with its animal entry over water was found"}
+    s.lua("local v=SplintLabServer.wt local hd=AnimalDefinitions.getDef('hen') local tsq=v:getSquare() "
+          "for i=1,2 do v:addAnimalInTrailer(addAnimal(getCell(),tsq:getX(),tsq:getY(),0,'hen',hd:getRandomBreed())) end return 1")
+    before = s.lua("local v=SplintLabServer.wt return v:getAnimals():size()")
+    off = s.log_size()
+    unloaded = s.lua("local v=SplintLabServer.wt local out={} while v:getAnimals():size()>0 do local a=v:getAnimals():get(0) "
+                     "local n=v:removeAnimalFromTrailer(a) if instanceof(n,'IsoAnimal') then n:addToWorld() "
+                     "out[#out+1]='id='..n:getAnimalID()..' type='..tostring(n:getAnimalType())..' data='..tostring(n:getData()~=nil)"
+                     "..' at='..math.floor(n:getX())..','..math.floor(n:getY())..' water='..tostring(n:getCurrentSquare() and n:getCurrentSquare():isWaterSquare()) "
+                     "else out[#out+1]=tostring(n) end end return table.concat(out,'; ')")
+    time.sleep(15)
+    out = {"placed": placed, "in_trailer": before, "unloaded": unloaded, "lua_alive": heartbeat_alive(s),
+           "stats_frozen": stats_frozen(s)}
+    if out["lua_alive"]:
+        out["census"] = census(s, LAKE_SHORE[0], LAKE_SHORE[1], 14)
+        out["ghosts_in_update_list"] = s.lua(LIST_GHOSTS).split()[-1]
+    out["exceptions"] = exceptions(s.log_since(off))
+    return out
+
+
+def ovo_farms(s: Session) -> dict:
+    """'Loading OvO Farms and leaving it': the player visits Ovo Farms (its ranch animals spawn on
+    first load), leaves so the farm unloads while in-game days pass, and comes back, twice. The
+    farm's chicks are set one day short of growing, so they cross their growth age while nobody
+    is there and the area catches up when it loads again."""
+    off = s.log_size()
+    s.tp(*OVO_FARMS, settle=45)
+    out: dict = {"first_visit": {"census": census(s, *OVO_FARMS, 60), "ghosts_in_update_list": s.lua(LIST_GHOSTS).split()[-1]}}
+    out["first_visit"]["chicks_set_near_growth"] = s.lua(
+        f"local n=0 for _,a in ipairs(SplintLabServer.animalsOnSquares({OVO_FARMS[0]},{OVO_FARMS[1]},0,60)) do "
+        "if a:getData() and a:getAnimalType()=='chick' then " + NEAR_GROWTH + "n=n+1 end end return n")
+    # Every animal at the farm by ID, to tell animals that moved from animals that are gone.
+    snapshot = (f"local out={{}} for _,a in ipairs(SplintLabServer.animalsOnSquares({OVO_FARMS[0]},{OVO_FARMS[1]},0,60)) do "
+                "if a:getData() then out[#out+1]=a:getAnimalID()..':'..tostring(a:getAnimalType()) end end return table.concat(out,' ')")
+    first = dict(item.split(":") for item in s.lua(snapshot).split()[2:])
+    out["first_visit"]["ids"] = len(first)
+    h0 = world_hours(s)
+    for i in (1, 2):
+        s.tp(OVO_FARMS[0] + 2000, OVO_FARMS[1], settle=30)      # far enough for the farm to unload
+        out[f"away_{i}"] = wait_game_hours(s, 60)             # 2.5 in-game days away
+        s.tp(*OVO_FARMS, settle=40)
+        visit: dict = {"lua_alive": heartbeat_alive(s)}
+        if visit["lua_alive"]:
+            now = dict(item.split(":") for item in s.lua(snapshot).split()[2:])
+            missing = sorted(set(first) - set(now))
+            found = s.lua(WHERE_ID + "local out={} for _,id in ipairs({" + ",".join(missing or ["-999"]) + "}) do "
+                          "out[#out+1]=id..'='..where(id) end return table.concat(out,'; ')") if missing else ""
+            corpses = s.lua(f"local n=0 for dx=-60,60 do for dy=-60,60 do local sq=getCell():getGridSquare({OVO_FARMS[0]}+dx,{OVO_FARMS[1]}+dy,0) "
+                            "if sq then local b=sq:getDeadBodys() for i=0,b:size()-1 do if b:get(i):isAnimal() then n=n+1 end end end end end return n")
+            visit.update(game_hours_since_first_visit=round(world_hours(s) - h0, 1), census=census(s, *OVO_FARMS, 60),
+                         animal_corpses_at_farm=corpses.split()[-1],
+                         ghosts_in_update_list=s.lua(LIST_GHOSTS).split()[-1],
+                         missing_since_first_visit={k: first[k] for k in missing}, missing_found_elsewhere=found)
+        out[f"return_{i}"] = visit
+    out["stats_frozen"] = stats_frozen(s)
+    out["exceptions"] = exceptions(s.log_since(off))
+    return out
+
+
+def hutch_pocket(s: Session) -> dict:
+    """Hutch chicks pass their growth age without growing (the hutch skips stage checks), the
+    server restarts, then a player takes one into their pocket the way ISHutchGrabAnimal does.
+    A carried animal past its growth age grows at once, at the coordinates it carries, so where
+    a hutch animal 'is' decides where its next stage is built."""
+    x, y = fresh_spot(s, 960)
+    hx, hy = x - 6, y + 6
+    made = s.lua(f"local def=HutchDefinitions.hutchs['hutchhen'] local sq=getCell():getGridSquare({hx},{hy},0) "
+                 "local h=IsoHutch.new(sq,true,def.baseSprite,def,nil) h:transmitCompleteItemToClients() "
+                 # As ISPutAnimalInHutch does: the chick is picked up (out of the world, into the
+                 # player's hands), put inside, and the item leaves the inventory.
+                 "local cd=AnimalDefinitions.getDef('chick') local p=SplintLabServer.player() local n=0 "
+                 f"for i=0,3 do local a=addAnimal(getCell(),{x}+2,{y},0,'chick',cd:getRandomBreed()) a:addToWorld() " + NEAR_GROWTH +
+                 "local item=instanceItem('Base.Animal') item:setAnimal(a) a:removeFromWorld() a:removeFromSquare() a:setSquare(nil) "
+                 "p:getInventory():AddItem(item) a:getBehavior():setHourBeforeLeavingHutch(1) a:getData():setPreferredHutchPosition(i) "
+                 "if h:addAnimalInside(a) then n=n+1 end p:getInventory():Remove(item) end return n")
+    inside = (f"local h=IsoHutch.getHutch({hx},{hy},0) if not h then return 'no hutch' end local out={{}} "
+              "for i=0,h:getMaxAnimals()-1 do local a=h:getAnimal(i) if a then out[#out+1]=tostring(a:getAnimalType())..'#'"
+              "..a:getAnimalID()..'@'..math.floor(a:getX())..','..math.floor(a:getY())..','..math.floor(a:getZ())"
+              "..' age='..(a:getData() and a:getData():getAge() or -1) end end return #out..' '..table.concat(out,'; ')")
+    clock = wait_game_hours(s, 60)
+    before_restart = s.lua(inside)
+    s2, saving = restart(s)
+    login = after_login(s2, x, y, 15)
+    out = {"made": made, "clock_before_restart": clock, "inside_before_restart": before_restart,
+           "save_and_quit": saving, "after_login": login}
+    if not login["lua_alive"]:
+        return out
+    out["inside_after_restart"] = s2.lua(inside)
+    off = s2.log_size()
+    grabbed = s2.lua(f"local h=IsoHutch.getHutch({hx},{hy},0) local p=SplintLabServer.player() "
+                     "for i=0,h:getMaxAnimals()-1 do local a=h:getAnimal(i) if a then "
+                     "local item=instanceItem('Base.Animal') item:setAnimal(a) h:removeAnimal(a) p:getInventory():AddItem(item) "
+                     "h:sync() return a:getAnimalID() end end return -1").split()[-1]
+    time.sleep(30)
+    grab: dict = {"id": grabbed, "lua_alive": heartbeat_alive(s2), "stats_frozen": stats_frozen(s2),
+                  "player_alive": player_alive(s2)}
+    if grab["lua_alive"]:
+        grab.update(inventory=s2.lua(INVENTORY_ANIMALS), where=s2.lua(WHERE_ID + f"return where({grabbed})"),
+                    ghosts_in_update_list=s2.lua(LIST_GHOSTS).split()[-1], census=census(s2, x, y, 15))
+    grab["exceptions"] = exceptions(s2.log_since(off))
+    out["grabbed_after_restart"] = grab
+    return out
+
+
+# One weapon per weapon category the running game defines (read from its item scripts, so new
+# weapons, categories and mods are covered without changing this file), plus one ranged weapon.
+WEAPON_PICKS = ("local all=getScriptManager():getAllItems() local seen,picks={},{} for i=0,all:size()-1 do local it=all:get(i) "
+                "if not it:getObsolete() then local keys={} if it:isRanged() then keys[#keys+1]='Ranged' end "
+                "local cats=it:getWeaponCategories() if cats then local ci=cats:iterator() while ci:hasNext() do keys[#keys+1]=tostring(ci:next()) end end "
+                "for _,k in ipairs(keys) do if not seen[k] then seen[k]=it:getFullName() picks[#picks+1]=k..'='..it:getFullName() end end end end "
+                "table.sort(picks) SplintLabServer.weapons=picks return table.concat(picks,' ')")
+
+
+def weapon_kill_butcher(s: Session) -> dict:
+    """'I butchered some chickens before I logged': a hen is killed with one weapon from every
+    weapon category through the game's own hit code, each carcass is butchered the way
+    ISButcherAnimal does, one carcass is carried, and the player logs out and back in while
+    in-game days pass."""
+    x, y = fresh_spot(s, 1080)
+    picks = s.lua(WEAPON_PICKS).split()[2:]
+    kills = s.lua(
+        "local p=SplintLabServer.player() local hd=AnimalDefinitions.getDef('hen') local out={} SplintLabServer.kills={} "
+        "for i,pick in ipairs(SplintLabServer.weapons) do local cat,name=pick:match('([^=]+)=(.+)') "
+        "local hen=addAnimal(getCell(),math.floor(p:getX())+2+i,math.floor(p:getY())+2,0,'hen',hd:getRandomBreed()) hen:addToWorld() "
+        "local ok,err=pcall(function() local w=instanceItem(name) hen:Hit(w,p,1000,false,1.0) end) "
+        "out[#out+1]=cat..(ok and ':hit' or (':error '..tostring(err))) end return table.concat(out,' ')")
+    time.sleep(10)
+    corpses = (f"local bodies={{}} for dx=-30,30 do for dy=-10,10 do local sq=getCell():getGridSquare({x}+dx,{y}+dy,0) "
+               "if sq then local b=sq:getDeadBodys() for i=0,b:size()-1 do if b:get(i):isAnimal() then bodies[#bodies+1]=b:get(i) end end end end end ")
+    dead = s.lua(corpses + "return #bodies")
+    butchered = s.lua(
+        corpses + "local p=SplintLabServer.player() local before=p:getInventory():getItems():size() local ok,bad=0,{} "
+        "for i=1,#bodies-1 do local r,err=pcall(ButcheringUtil.butcherAnimalFromGround,bodies[i],p) if r then ok=ok+1 else bad[#bad+1]=tostring(err) end end "
+        "if #bodies>0 then local b=bodies[#bodies] local item=b:getItem() if item then p:getInventory():AddItem(item) b:getSquare():removeCorpse(b,false) b:invalidateCorpse() end end "
+        "return 'butchered='..ok..' items_gained='..(p:getInventory():getItems():size()-before)..' errors='..table.concat(bad,'|')")
+    off = s.log_size()
+    s2, saving = restart(s)
+    login = after_login(s2, x, y, 30)
+    out = {"weapons_by_category": picks, "kills": kills, "animal_corpses": dead, "butchering": butchered,
+           "exceptions_before_restart": exceptions(s.log_since(off)), "save_and_quit": saving, "after_login": login}
+    if login["lua_alive"]:
+        later_off = s2.log_size()
+        clock = wait_game_hours(s2, 48)
+        later: dict = {"clock": clock, "lua_alive": heartbeat_alive(s2), "player_alive": player_alive(s2)}
+        if later["lua_alive"]:
+            later["ghosts_in_update_list"] = s2.lua(LIST_GHOSTS).split()[-1]
+        later["exceptions"] = exceptions(s2.log_since(later_off))
+        out["two_days_later"] = later
+    return out
+
+
+def stored_on_water_growth(s: Session) -> dict:
+    """A trailer chick whose stored square is water reaches its growth age. AnimalData.grow
+    deletes the animal and its next stage when checkForWater says the parent stands on water,
+    which a stored animal does not. The water square is set directly (a constructed state: a
+    trailer animal keeps whatever square it last had)."""
+    s.tp(*LAKE_SHORE)
+    made = s.lua(f"local tsq=getCell():getGridSquare({LAKE_SHORE[0]}-3,{LAKE_SHORE[1]},0) "
+                 "local v=addVehicleDebug('Base.Trailer_Livestock',IsoDirections.N,nil,tsq) SplintLabServer.wv=v "
+                 "local cd=AnimalDefinitions.getDef('chick') "
+                 f"for i=1,3 do local a=addAnimal(getCell(),{LAKE_SHORE[0]}-3,{LAKE_SHORE[1]},0,'chick',cd:getRandomBreed()) v:addAnimalInTrailer(a) end "
+                 f"local w=getCell():getGridSquare({LAKE_WATER[0]},{LAKE_WATER[1]},0) "
+                 "for i=0,v:getAnimals():size()-1 do local a=v:getAnimals():get(i) a:setX(w:getX()+0.5) a:setY(w:getY()+0.5) a:setCurrent(w) end "
+                 "return v:getAnimals():size()..' water='..tostring(w:isWaterSquare())")
+    listing = ("local v=SplintLabServer.wv local out={} for i=0,v:getAnimals():size()-1 do local a=v:getAnimals():get(i) "
+               "out[#out+1]=tostring(a:getAnimalType())..'#'..a:getAnimalID() end return #out..' '..table.concat(out,',')")
+    before = s.lua(listing)
+    off = s.log_size()
+    s.lua("local v=SplintLabServer.wv for i=0,v:getAnimals():size()-1 do local a=v:getAnimals():get(i) "
+          "a:setHoursSurvived(400*24) a:getData():setAge(400) end return 1")
+    time.sleep(40)
+    out = {"made": made, "before": before, "lua_alive": heartbeat_alive(s)}
+    if out["lua_alive"]:
+        out.update(after=s.lua(listing), census=census(s, LAKE_SHORE[0], LAKE_SHORE[1], 10),
+                   ghosts_in_update_list=s.lua(LIST_GHOSTS).split()[-1])
+    out["exceptions"] = exceptions(s.log_since(off))
+    return out
+
+
+def aging_rates(s: Session) -> dict:
+    """How fast animals age in each place they can be (on the map, carried, in a livestock
+    trailer, in a hutch), measured as days of age gained per in-game day, at a slow clock and in
+    the time chamber. The slow clock is the reference: an update the game throttles in real time
+    falls behind in the chamber, so a difference between the two is a chamber artefact, while a
+    rate other than the sandbox AnimalAgeModifier at the slow clock is the game's behaviour."""
+    x, y = fresh_spot(s, 1200)
+    hx, hy = x - 6, y + 6
+    made = s.lua(
+        "local p=SplintLabServer.player() p:setGodMod(true) p:setInvincible(true) local cd=AnimalDefinitions.getDef('chick') "
+        "SplintLabServer.places={world={},pocket={},trailer={},hutch={}} local P=SplintLabServer.places "
+        "local function chick(dx,dy) local a=addAnimal(getCell(),math.floor(p:getX())+dx,math.floor(p:getY())+dy,0,'chick',cd:getRandomBreed()) "
+        "a:addToWorld() a:getData():setAge(10) a:setHoursSurvived(240) return a end "
+        "for i=1,3 do table.insert(P.world, chick(3,i)) end "
+        "for i=1,3 do local a=chick(2,-i) local item=instanceItem('Base.Animal') item:setAnimal(a) a:removeFromWorld() a:removeFromSquare() "
+        "a:setSquare(nil) p:getInventory():AddItem(item) table.insert(P.pocket,a) end "
+        f"local v=addVehicleDebug('Base.Trailer_Livestock',IsoDirections.N,nil,getCell():getGridSquare({x}+8,{y}-8,0)) "
+        f"for i=1,3 do local a=addAnimal(getCell(),{x}+8,{y}-8,0,'chick',cd:getRandomBreed()) a:getData():setAge(10) a:setHoursSurvived(240) "
+        "v:addAnimalInTrailer(a) table.insert(P.trailer,a) end "
+        f"local def=HutchDefinitions.hutchs['hutchhen'] local h=IsoHutch.new(getCell():getGridSquare({hx},{hy},0),true,def.baseSprite,def,nil) "
+        "h:transmitCompleteItemToClients() for i=1,3 do local a=chick(1,1) local item=instanceItem('Base.Animal') item:setAnimal(a) "
+        "a:removeFromWorld() a:removeFromSquare() a:setSquare(nil) a:getBehavior():setHourBeforeLeavingHutch(1000) "
+        "a:getData():setPreferredHutchPosition(i-1) h:addAnimalInside(a) table.insert(P.hutch,a) end "
+        "return 'world='..#P.world..' pocket='..#P.pocket..' trailer='..#P.trailer..' hutch='..#P.hutch")
+    ages = ("local out={} for _,k in ipairs({'world','pocket','trailer','hutch'}) do local t={} "
+            "for _,a in ipairs(SplintLabServer.places[k]) do t[#t+1]=(a:getData() and a:getData():getAge() or -1) end "
+            "out[#out+1]=k..'='..table.concat(t,',') end return table.concat(out,' ')")
+
+    def parse(text: str) -> dict:
+        out = {}
+        for part in text.split()[2:]:
+            k, v = part.split("=")
+            vals = [int(n) for n in v.split(",") if n and n != "-1"]
+            out[k] = sum(vals) / len(vals) if vals else None
+        return out
+
+    def measure(label: str, mpd: float, speed: float, hours: float) -> dict:
+        a0 = parse(s.lua(ages))
+        h0 = world_hours(s)
+        set_time(s, mpd, speed)
+        t0 = time.time()
+        while world_hours(s) - h0 < hours and time.time() - t0 < 900:
+            time.sleep(2)
+        set_time(s, 60, 1)
+        days = (world_hours(s) - h0) / 24
+        a1 = parse(s.lua(ages))
+        rates = {k: (round((a1[k] - a0[k]) / days, 2) if a0.get(k) is not None and a1.get(k) is not None else None) for k in a0}
+        return {"clock": label, "game_days": round(days, 2), "days_of_age_per_game_day": rates}
+
+    return {"made": made, "age_modifier": s.lua("return SandboxVars.AnimalAgeModifier or 'unset'").split()[-1],
+            "slow": measure("1 minute per day", 1, 1, 48), "chamber": measure("1 minute per day x settimespeed 20", 1, 20, 72),
+            "exceptions": exceptions(s.log_since(s.ready_offset))}
+
+
+CHAMBER_SETTINGS = [(60, 1), (1, 1), (1, 5), (1, 20), (1, 40), (0.25, 40), (0.25, 100)]
+
+
+def time_chamber(s: Session) -> dict:
+    """How fast can the lab run the game's clock and still trust it? A farm of 200 chicks (a few
+    in-game days from growing) and 50 hens runs under each (minutes per day, settimespeed) pair
+    for 30 real seconds. Each row: in-game hours per real second, ticks per second, server CPU per
+    tick, whether the world update stays alive, exceptions, chicks grown so far and animals in the
+    update list (growth keeps that number: a drop means animals were lost)."""
+    x, y = fresh_spot(s, 300)
+    s.lua("local p=SplintLabServer.player() p:setGodMod(true) p:setInvincible(true) return 1")
+    s.server(f"spawn chick - 200 0 0 12 {grows_at(s, 'chicken', 'chick') - 6}")
+    s.server("spawn hen - 50 0 0 12 200")
+    count_types = (f"local c,a=0,0 for _,an in ipairs(SplintLabServer.animalsOnSquares({x},{y},0,16)) do "
+                   "local t=an:getAnimalType() if t=='chick' then c=c+1 elseif t=='hen' or t=='cockerel' then a=a+1 end end "
+                   "return c..' '..a")
+    rows = []
+    for mpd, speed in CHAMBER_SETTINGS:
+        set_time(s, mpd, speed)
+        off = s.log_size()
+        h0 = world_hours(s)
+        stats = tick_stats(s, window=30)
+        alive = heartbeat_alive(s, wait=6)
+        row = {"minutes_per_day": mpd, "timespeed": speed, "lua_alive": alive, **stats,
+               "exceptions": exceptions(s.log_since(off))}
+        if alive:
+            h1 = world_hours(s)
+            chicks, adults = s.lua(count_types).split()[-2:]
+            corpses = s.lua(f"local n=0 for dx=-40,40 do for dy=-40,40 do local sq=getCell():getGridSquare({x}+dx,{y}+dy,0) "
+                            "if sq then local b=sq:getDeadBodys() for i=0,b:size()-1 do if b:get(i):isAnimal() then n=n+1 end end end end end return n")
+            row.update(game_hours_per_real_second=round((h1 - h0) / 36, 3), chicks=int(chicks), adults=int(adults),
+                       animals_in_update_list=int(s.lua(TOTAL_ANIMALS).split()[-1]), animal_corpses=int(corpses.split()[-1]))
+        rows.append(row)
+        if not alive:
+            break
+    set_time(s, 60, 1)
+    return {"rows": rows}
+
+
+OPEN_QUESTIONS = {f.__name__.replace("_", "-"): f for f in
+                  (ghost_save_restart, ghost_save_splint_resume, pocket_far_growth, pocket_relog, carcass_relog,
+                   trailer_relog, trailer_unload_water, ovo_farms, hutch_pocket, weapon_kill_butcher)}
+
+
 SCENARIOS = {f.__name__.replace("_", "-"): f for f in
              (mass_growth, duplicate_ids, invalid_type, water_seed, grow_near_ghost, grow_near_invalid_ghost,
               malformed_breed, legacy_dup_reload, unload_with_ghost)}
@@ -519,15 +1124,21 @@ SCENARIOS = {f.__name__.replace("_", "-"): f for f in
 EXTRA = {"admin-commands": admin_commands, "stress-2000": stress_2000, "stress-5000": stress_5000}
 # Storage-place growth investigations.
 EXTRA.update({f.__name__.replace('_', '-'): f for f in (inventory_growth, trailer_growth, hutch_growth)})
+EXTRA.update(OPEN_QUESTIONS)
+EXTRA["time-chamber"] = time_chamber
+EXTRA["aging-rates"] = aging_rates
+EXTRA["stored-on-water-growth"] = stored_on_water_growth
 
 
-def start(evidence: Path, agent: str | None) -> Session:
+def start(evidence: Path, agent: str | None, resume: Path | None = None) -> Session:
     # The stock dedicated server runs with -Xmx8g (ProjectZomboid64.json); 5000 animated animals
     # need it. SPLINT_SERVER_HEAP overrides.
     cmd = [sys.executable, str(LAB / "splintlab.py"), "start", str(evidence),
            "--server-heap", os.environ.get("SPLINT_SERVER_HEAP", "8g")]
     if agent:
         cmd += ["--agent", agent]
+    if resume:
+        cmd += ["--resume", str(resume)]
     evidence.mkdir(parents=True, exist_ok=True)
     proc = subprocess.Popen(cmd, stdout=(evidence.parent / f"{evidence.name}.owner.log").open("w"),
                             stderr=subprocess.STDOUT)
@@ -541,6 +1152,7 @@ def start(evidence: Path, agent: str | None) -> Session:
             raise SystemExit(f"session failed to start: {evidence}")
         time.sleep(3)
     time.sleep(5)
+    s.ready_offset = s.log_size()
     if agent:
         # A patched run is only evidence if the patch is live in this JVM.
         status = console_reply(s, "splint status", wait=8)
@@ -592,6 +1204,8 @@ def main() -> None:
         (root / "results.json").write_text(json.dumps(results, indent=2) + "\n")
 
     def stop(s: Session) -> None:
+        for child in s.children:
+            stop(child)
         subprocess.run([sys.executable, str(LAB / "splintlab.py"), "stop", str(s.evidence)])
         s.proc.wait(timeout=60)
 

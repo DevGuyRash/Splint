@@ -7,7 +7,8 @@ under an evidence directory. Fixture mods in the caches read sequence-numbered c
 and print [SPLAB] / [SPLAB-S] lines that this script waits for. The connected client is what
 keeps chunks loaded around a real player, exactly as on a live server.
 
-    splintlab.py start  EVIDENCE [--agent JAR] [--sandbox Key=Value ...]   (stays in foreground)
+    splintlab.py start  EVIDENCE [--agent JAR] [--sandbox Key=Value ...] [--resume OLD]   (foreground)
+    splintlab.py quit   EVIDENCE   (saves the world through the server's own `quit`, then stops)
     splintlab.py server EVIDENCE <fixture command...>
     splintlab.py client EVIDENCE <fixture command...>
     splintlab.py console EVIDENCE <server console line...>
@@ -167,13 +168,18 @@ def cmd_start(args: argparse.Namespace) -> None:
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)
 
-    # Server cache and configuration.
+    # Server cache and configuration. --resume continues an earlier session's saved world (its
+    # save, player database and admin account), as a restart or a rollback does on a real server.
     server_cache = evidence / "server-cache"
+    admin, password = "splintadmin", secrets.token_hex(12)
+    if args.resume:
+        old = Path(args.resume).resolve()
+        shutil.copytree(old / "server-cache", server_cache, ignore=shutil.ignore_patterns("server-console.txt"))
+        password = json.loads((old / "session.json").read_text())["password"]
     ids = install_mods(server_cache / "mods")
     port, udp = free_port(), free_port()
     while udp == port:
         udp = free_port()
-    admin, password = "splintadmin", secrets.token_hex(12)
     (server_cache / "Server").mkdir(parents=True, exist_ok=True)
     (server_cache / "Lua").mkdir(parents=True, exist_ok=True)
     (server_cache / "Server" / f"{SERVER_NAME}.ini").write_text(
@@ -209,8 +215,9 @@ def cmd_start(args: argparse.Namespace) -> None:
         stdin=subprocess.PIPE, stdout=server_log.open("w"), stderr=subprocess.STDOUT, text=True,
     )
     procs.append(server)
-    state = {"owner_pid": os.getpid(), "server_pid": server.pid, "port": port, "admin": admin,
-             "agent": args.agent, "sandbox": sandbox}
+    # The password is a throwaway for this loopback-only session; it is kept so --resume can log in.
+    state = {"owner_pid": os.getpid(), "server_pid": server.pid, "port": port, "admin": admin, "password": password,
+             "agent": args.agent, "sandbox": sandbox, "resumed_from": args.resume}
     (evidence / "session.json").write_text(json.dumps(state, indent=2) + "\n")
     console_txt = server_cache / "server-console.txt"
     wait_log(console_txt, "SERVER STARTED", 900, alive=lambda: server.poll() is None)
@@ -342,6 +349,26 @@ def cmd_stop(args: argparse.Namespace) -> None:
             os.kill(pid, signal.SIGKILL)
 
 
+def cmd_quit(args: argparse.Namespace) -> None:
+    """The server's own `quit` (it saves the world first), then the rest of the session stops.
+    Prints 'saved' when the server logged that its save finished (on a loaded machine the
+    shutdown after the save can take minutes), 'unsaved' when it never did."""
+    evidence = Path(args.evidence).resolve()
+    state = json.loads((evidence / "session.json").read_text())
+    console = evidence / "server-cache" / "server-console.txt"
+    offset = console.stat().st_size
+    with (evidence / "console-in.txt").open("a") as f:
+        f.write("quit\n")
+    deadline = time.time() + args.timeout
+    while time.time() < deadline and _alive(state["server_pid"]):
+        time.sleep(1)
+    with console.open(errors="replace") as f:
+        f.seek(offset)
+        saved = "Saving finish" in f.read()
+    cmd_stop(args)
+    print("saved" if saved else "unsaved")
+
+
 def _alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
@@ -362,7 +389,12 @@ def main() -> None:
     p.add_argument("--no-client", action="store_true")
     p.add_argument("--server-heap", default="3g")
     p.add_argument("--client-heap", default="3g")
+    p.add_argument("--resume", help="evidence directory of a quit session whose saved world to continue")
     p.set_defaults(func=cmd_start)
+    p = sub.add_parser("quit")
+    p.add_argument("evidence")
+    p.add_argument("--timeout", type=float, default=900)
+    p.set_defaults(func=cmd_quit)
     for side in ("server", "client"):
         p = sub.add_parser(side)
         p.add_argument("evidence")
