@@ -39,14 +39,20 @@ def summary(v: dict | None) -> str:
         parts.append("world update running" if alive else "**world update stopped** (Lua ticks dead)")
     if v.get("stats_frozen"):
         parts.append("player stats frozen")
-    for key in ("lost",):
-        if key in v:
-            parts.append(f"{v[key]} animals lost")
-    for key in ("before", "after"):
-        if isinstance(v.get(key), str):
-            m = re.search(r"dupIdGroups=(\d+)", v[key])
-            if m and key == "before":
-                parts.append(f"{m.group(1)} duplicate-ID groups")
+    if "lost" in v:
+        parts.append(f"{v['lost']} animals lost")
+    if "tps_with_animals" in v:
+        parts.append(f"ticks/s {v.get('tps_empty')} empty, {v['tps_with_animals']} loaded, {v.get('tps_after_growth')} after growth")
+    if v.get("player_alive") is False:
+        parts.append("**player died** (result invalid)")
+    if "all_checks_pass" in v:
+        parts.append("all command checks pass" if v["all_checks_pass"] else "**command checks failed**")
+    groups = [re.search(r"dupIdGroups=(\d+)", v[k]) for k in ("before", "after") if isinstance(v.get(k), str)]
+    groups = [g.group(1) for g in groups if g]
+    if len(groups) == 2:
+        parts.append(f"duplicate-ID groups {groups[0]} → {groups[1]}")
+    elif groups:
+        parts.append(f"{groups[0]} duplicate-ID groups")
     return "; ".join(parts)
 
 

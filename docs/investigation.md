@@ -104,7 +104,32 @@ When a chunk unloads, its animals join virtual herds in the population worker. `
 
 Each scenario runs in a fresh session. Results: `vanilla` without Splint, `splint` with it.
 
-RESULTS_TABLE
+Each row is one scenario from `lab/scenarios.py`, run on the steamcmd dedicated server with a headless client, first without and then with Splint (`lab/report.py` builds this table from the runs' `results.json`). "World update stopped" means the server's Lua tick heartbeat, which runs inside the world update, stopped. Stress rows count animals in the server's whole update list, with the player invincible (grown rams and boars attack, and a dead player would unload the area), on the stock 8 GB server heap; the vanilla and Splint stress runs ran back to back, because tick rates on a shared machine are only comparable when measured together.
+
+| Scenario | Vanilla 42.22.2 | With Splint |
+|---|---|---|
+| `mass-growth` | no exceptions; world update running; 4 animals lost; duplicate-ID groups 15 → 11 | no exceptions; world update running; 0 animals lost; duplicate-ID groups 0 → 0 |
+| `duplicate-ids` | no exceptions; 1 animals lost; duplicate-ID groups 0 → 0 | no exceptions; 0 animals lost; duplicate-ID groups 0 → 0 |
+| `invalid-type` | 425× `turnDelta`; **world update stopped** (Lua ticks dead); player stats frozen | no exceptions; world update running |
+| `water-seed` | 424× `turnDelta`; **world update stopped** (Lua ticks dead) | no exceptions; world update running |
+| `grow-near-ghost` | 475× `textureSkinned`; **world update stopped** (Lua ticks dead); player stats frozen; 0 duplicate-ID groups | no exceptions; world update running; duplicate-ID groups 0 → 0 |
+| `unload-with-ghost` | 1298× `turnDelta`, 723× `getAttachedTree`, 723× `textureSkinned`; **world update stopped** (Lua ticks dead); player stats frozen | no exceptions; world update running |
+| `grow-near-invalid-ghost` | 479× `textureSkinned`; **world update stopped** (Lua ticks dead); player stats frozen; 0 duplicate-ID groups | no exceptions; world update running; duplicate-ID groups 0 → 0 |
+| `inventory-growth` | no exceptions; world update running | no exceptions; world update running |
+| `trailer-growth` | no exceptions; world update running | no exceptions; world update running |
+| `legacy-dup-reload` | no exceptions; world update running; 0 animals lost; duplicate-ID groups 1 → 1 | no exceptions; world update running; 0 animals lost; duplicate-ID groups 1 → 0 |
+| `hutch-growth` | no exceptions; world update running | no exceptions; world update running |
+| `stress-2000` | no exceptions; world update running; 10 animals lost; ticks/s 10.1 empty, 5.13 loaded, 6.27 after growth; duplicate-ID groups 181 → 162 | no exceptions; world update running; 0 animals lost; ticks/s 10.13 empty, 5.4 loaded, 6.33 after growth; duplicate-ID groups 0 → 0 |
+| `stress-5000` | no exceptions; world update running; 19 animals lost; ticks/s 10.07 empty, 1.1 loaded, 1.4 after growth; duplicate-ID groups 900 → 880 | no exceptions; world update running; 0 animals lost; ticks/s 10.13 empty, 1.0 loaded, 1.4 after growth; duplicate-ID groups 0 → 0 |
+| `malformed-breed` | 525× `getName`; **world update stopped** (Lua ticks dead); 0 duplicate-ID groups | no exceptions; world update running; duplicate-ID groups 0 → 0 |
+| `admin-commands` | not run | no exceptions; world update running; all command checks pass |
+
+Notes:
+
+- Duplicate-ID loss in vanilla is random. Whether a growing animal has a same-ID neighbour within 4 squares varies, so the counts vary between runs: `mass-growth` lost 0, 1 and 4 animals in three vanilla runs. With Splint, no run has lost an animal.
+- At 5,000 animals the server slows to about one tick per second with or without Splint; that is the game's own animal simulation. With Splint the tick rates match vanilla within the heartbeat's resolution.
+- `legacy-dup-reload` did not trigger vanilla's herd-join drop (finding 10) in this run; the duplicate simply survived. With Splint it was repaired.
+- `inventory-growth`, `trailer-growth` and `hutch-growth` behave the same with and without Splint; they document how growth works in each storage place (finding 9).
 
 ## Open questions
 
