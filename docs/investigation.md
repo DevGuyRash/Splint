@@ -108,7 +108,7 @@ When a mass spawn overlapped a river, 303 of the new animals came out half-built
 
 Each scenario runs in a fresh session. Results: `vanilla` without Splint, `splint` with it.
 
-Each row is one scenario from `lab/scenarios.py`, run on the steamcmd dedicated server with a headless client, first without and then with Splint (`lab/report.py` builds this table from the runs' `results.json`). "World update stopped" means the server's Lua tick heartbeat, which runs inside the world update, stopped. Stress rows count animals in the server's whole update list, with the player invincible (grown rams and boars attack, and a dead player would unload the area), on the stock 8 GB server heap; the vanilla and Splint stress runs ran back to back, because tick rates on a shared machine are only comparable when measured together.
+Each row is one scenario from `lab/scenarios.py`, run on the steamcmd dedicated server with a headless client, first without and then with Splint (`lab/report.py` builds this table from the runs' `results.json`). "World update stopped" means the server's Lua tick heartbeat, which runs inside the world update, stopped. Stress rows count animals in the server's whole update list, with the player invincible (grown rams and boars attack, and a dead player would unload the area), on the stock 8 GB server heap; the vanilla and Splint stress runs were interleaved, because a shared machine's load changes from run to run.
 
 | Scenario | Vanilla 42.22.2 | With Splint |
 |---|---|---|
@@ -123,15 +123,27 @@ Each row is one scenario from `lab/scenarios.py`, run on the steamcmd dedicated 
 | `trailer-growth` | no exceptions; world update running | no exceptions; world update running |
 | `legacy-dup-reload` | no exceptions; world update running; 0 animals lost; duplicate-ID groups 1 → 1 | no exceptions; world update running; 0 animals lost; duplicate-ID groups 1 → 0 |
 | `hutch-growth` | no exceptions; world update running | no exceptions; world update running |
-| `stress-2000` | no exceptions; world update running; 10 animals lost; ticks/s 10.1 empty, 5.13 loaded, 6.27 after growth; duplicate-ID groups 181 → 162 | no exceptions; world update running; 0 animals lost; ticks/s 10.13 empty, 5.4 loaded, 6.33 after growth; duplicate-ID groups 0 → 0 |
-| `stress-5000` | no exceptions; world update running; 19 animals lost; ticks/s 10.07 empty, 1.1 loaded, 1.4 after growth; duplicate-ID groups 900 → 880 | no exceptions; world update running; 0 animals lost; ticks/s 10.13 empty, 1.0 loaded, 1.4 after growth; duplicate-ID groups 0 → 0 |
+| `stress-2000` | no exceptions; world update running; 5 animals lost; ticks/s 10.07 empty, 5.6 loaded, 6.87 after growth; server CPU ms/tick 6.6 empty, 216.6 loaded, 149.8 after growth; duplicate-ID groups 154 → 146 | no exceptions; world update running; 0 animals lost; ticks/s 10.07 empty, 5.27 loaded, 8.0 after growth; server CPU ms/tick 4.5 empty, 237.9 loaded, 127.2 after growth; duplicate-ID groups 0 → 0 |
+| `stress-5000` | no exceptions; world update running; 21 animals lost; ticks/s 10.13 empty, 1.4 loaded, 1.4 after growth; server CPU ms/tick 3.9 empty, 935.0 loaded, 759.6 after growth; duplicate-ID groups 886 → 840 | no exceptions; world update running; 0 animals lost; ticks/s 10.07 empty, 1.07 loaded, 1.53 after growth; server CPU ms/tick 3.0 empty, 957.7 loaded, 681.2 after growth; duplicate-ID groups 0 → 0 |
 | `malformed-breed` | 525× `getName`; **world update stopped** (Lua ticks dead); 0 duplicate-ID groups | no exceptions; world update running; duplicate-ID groups 0 → 0 |
 | `admin-commands` | not run | no exceptions; world update running; all command checks pass |
+
+Speed, four interleaved runs on the final build (vanilla, Splint, vanilla, Splint), measured as the dedicated server's CPU milliseconds per world tick across all its threads, mean of two runs (individual runs in brackets). Lower is better. CPU time per tick is far less sensitive to other load on the machine than ticks per second, which varied by up to 50% between identical runs here.
+
+| Animals | Vanilla | Splint |
+|---|---|---|
+| 2,000 loaded | 251 ms (286, 217) | 214 ms (190, 238) |
+| 2,000 after growth | 176 ms (201, 150) | 133 ms (140, 127) |
+| 5,000 loaded | 978 ms (1,022, 935) | 901 ms (844, 958) |
+| 5,000 after growth | 670 ms (580, 760) | 634 ms (587, 681) |
+| animals lost in growth | 5, 5 and 18, 21 | 0, 0 and 0, 0 |
+
+Splint adds no measurable cost. Its means were lower in all four rows, but the runs overlap, so no speed-up is claimed.
 
 Notes:
 
 - Duplicate-ID loss in vanilla is random. Whether a growing animal has a same-ID neighbour within 4 squares varies, so the counts vary between runs: `mass-growth` lost 0, 1 and 4 animals in three vanilla runs. With Splint, no run has lost an animal.
-- At 5,000 animals the server slows to about one tick per second with or without Splint; that is the game's own animal simulation. With Splint the tick rates match vanilla within the heartbeat's resolution.
+- At 5,000 animals the server slows to about one tick per second with or without Splint; that is the game's own animal simulation.
 - `legacy-dup-reload` did not trigger vanilla's herd-join drop (finding 10) in this run; the duplicate simply survived. With Splint it was repaired.
 - `inventory-growth`, `trailer-growth` and `hutch-growth` behave the same with and without Splint; they document how growth works in each storage place (finding 9).
 
