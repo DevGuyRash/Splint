@@ -16,7 +16,11 @@ import zombie.vehicles.BaseVehicle;
  * Values are weak, so objects the game drops silently (a hutch or trailer unloading with its
  * chunk, a player logging out with an animal in a bag) neither leak nor keep their ID taken.
  *
- * <p>Main game thread only: animal creation, loading and removal all happen there.
+ * <p>Main game thread only. Work from other threads (the chunk loader) reaches it through
+ * {@code Threads.onMain}. Entries are never removed when an animal object goes away: the weak
+ * value and {@link #isLive} make a stale entry harmless, while removing entries too eagerly
+ * (an animal that turns virtual and comes back as the same object) would hide real
+ * duplicates. A missing entry only means one fewer duplicate caught, never a wrong re-ID.
  */
 final class AnimalIndex {
     private static final IntWeakMap<IsoAnimal> BY_ID = new IntWeakMap<>(8192);
@@ -43,7 +47,10 @@ final class AnimalIndex {
             if (cell != null && (cell.getObjectList().contains(a) || cell.getAddList().contains(a))) return true;
             if (a.isOnHook()) return true;
             IsoHutch h = a.getHutch();
-            if (h != null && h.isExistInTheWorld() && (h.getAnimalInside().containsValue(a) || a.nestBox >= 0)) return true;
+            // A hutch counts only while the hutch manager still updates it: an unloaded hutch's
+            // object can linger, still claiming its animals, until its square is recycled.
+            if (h != null && h.isExistInTheWorld() && AnimalOps.hutches().contains(h)
+                    && (h.getAnimalInside().containsValue(a) || a.nestBox >= 0)) return true;
             BaseVehicle v = a.getVehicle();
             if (v != null && v.animals.contains(a) && cell != null && cell.getVehicles().contains(v)) return true;
             ItemContainer c = a.getContainer();

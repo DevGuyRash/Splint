@@ -1,24 +1,12 @@
 package splint.core;
 
 import java.lang.invoke.MethodHandle;
-import java.lang.invoke.MethodHandles;
-import java.lang.invoke.MethodType;
-import splint.core.patch.Patcher;
+import splint.core.patch.Originals;
 import zombie.iso.IsoWorld;
 
 /** Hooks for {@link CoreModule}. */
 public final class CoreHooks {
-    private static final class WorldUpdate {
-        static final MethodHandle H;
-        static {
-            try {
-                H = MethodHandles.publicLookup().findVirtual(IsoWorld.class, Patcher.ORIGINAL_PREFIX + "update",
-                        MethodType.methodType(void.class));
-            } catch (ReflectiveOperationException e) {
-                throw new IllegalStateException(e);
-            }
-        }
-    }
+    private static final class WorldUpdate { static final MethodHandle H = Originals.virtual(IsoWorld.class, "update", void.class); }
 
     private CoreHooks() {}
 

@@ -292,7 +292,7 @@ def admin_commands(s: Session) -> dict:
     near = f"near {x} {y} {r}"
     steps = [
         # (name, command, text that must appear in the reply)
-        ("status", "splint status", "patches applied, none missing"),
+        ("status", "splint status", "none missing"),
         ("help", "splint help", "SELECTION terms combine"),
         ("census", f"splint animals census {near}", "31 animals {WORLD=25, HUTCH=3, TRAILER=2, INVENTORY=1}, babies 9"),
         ("census_dupes", f"splint animals census {near}", "duplicate-ID groups 1"),

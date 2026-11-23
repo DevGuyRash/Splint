@@ -35,6 +35,9 @@ public interface SplintModule {
     /** Expressions to replace in place. */
     default List<Redirect> redirects() { return List.of(); }
 
+    /** Fields to add to game classes, for per-object state (see {@link splint.core.ObjectSlot}). */
+    default List<splint.core.patch.Patcher.Field> fields() { return List.of(); }
+
     /** Admin commands, reachable as {@code /splint <name> ...}. */
     default List<ModuleCommand> commands() { return List.of(); }
 
@@ -44,6 +47,11 @@ public interface SplintModule {
     /** Extra lines for {@code /splint status}. */
     default String status() { return ""; }
 
-    /** What this module knows about a player, for {@code /splint players} ("" for nothing). */
-    default String aboutPlayer(zombie.characters.IsoPlayer player) { return ""; }
+    /**
+     * What this module knows about each listed player, for {@code /splint players}. Called once
+     * per command with every player, so a module can scan once rather than once per player.
+     */
+    default java.util.Map<zombie.characters.IsoPlayer, String> aboutPlayers(List<zombie.characters.IsoPlayer> players) {
+        return java.util.Map.of();
+    }
 }

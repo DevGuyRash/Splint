@@ -38,7 +38,53 @@ public class VerifyPatches {
             }
         }
         for (String k : expected) if (!applied.contains(k)) { System.out.println("NOT APPLIED " + k); bad++; }
+        // Every hook and redirect target must exist as a public static method with the exact
+        // descriptor the rewritten game method calls; otherwise that game method throws
+        // NoSuchMethodError on every call, outside any hook's protection.
+        for (SplintModule m : ServiceLoader.load(SplintModule.class)) {
+            for (var p : m.patches()) {
+                var type = java.lang.constant.MethodTypeDesc.ofDescriptor(p.descriptor());
+                var params = new ArrayList<java.lang.constant.ClassDesc>();
+                if (!isStaticInGame(p.owner(), p.name(), p.descriptor())) {
+                    params.add(p.objectSelf() ? java.lang.constant.ConstantDescs.CD_Object : java.lang.constant.ClassDesc.ofInternalName(p.owner()));
+                }
+                params.addAll(type.parameterList());
+                bad += checkStatic(p.hookClass(), p.hookName(), java.lang.constant.MethodTypeDesc.of(type.returnType(), params.toArray(java.lang.constant.ClassDesc[]::new)));
+            }
+            for (var r : m.redirects()) {
+                var type = java.lang.constant.MethodTypeDesc.ofDescriptor(r.callDesc());
+                if (r.passThis()) {
+                    var params = new ArrayList<java.lang.constant.ClassDesc>();
+                    params.add(java.lang.constant.ClassDesc.ofInternalName(r.owner()));
+                    params.addAll(type.parameterList());
+                    type = java.lang.constant.MethodTypeDesc.of(type.returnType(), params.toArray(java.lang.constant.ClassDesc[]::new));
+                }
+                bad += checkStatic(r.newOwner(), r.newName(), type);
+            }
+        }
         System.out.println(applied.size() + " of " + expected.size() + " patches applied");
         System.exit(bad == 0 ? 0 : 1);
+    }
+
+    /** Whether the game method a patch replaces is static (its hook then has no self parameter). */
+    private static boolean isStaticInGame(String owner, String name, String descriptor) throws Exception {
+        Class<?> c = Class.forName(owner.replace('/', '.'), false, VerifyPatches.class.getClassLoader());
+        for (var mth : c.getDeclaredMethods()) {
+            String desc = java.lang.invoke.MethodType.methodType(mth.getReturnType(), mth.getParameterTypes()).toMethodDescriptorString();
+            if (mth.getName().equals(name) && desc.equals(descriptor)) return java.lang.reflect.Modifier.isStatic(mth.getModifiers());
+        }
+        throw new IllegalStateException("no " + owner + "." + name + descriptor + " in the game");
+    }
+
+    private static int checkStatic(String owner, String name, java.lang.constant.MethodTypeDesc want) throws Exception {
+        Class<?> c = Class.forName(owner.replace('/', '.'), false, VerifyPatches.class.getClassLoader());
+        for (var mth : c.getDeclaredMethods()) {
+            if (!mth.getName().equals(name)) continue;
+            String desc = java.lang.invoke.MethodType.methodType(mth.getReturnType(), mth.getParameterTypes()).toMethodDescriptorString();
+            int mod = mth.getModifiers();
+            if (desc.equals(want.descriptorString()) && java.lang.reflect.Modifier.isStatic(mod) && java.lang.reflect.Modifier.isPublic(mod)) return 0;
+        }
+        System.out.println("MISSING HOOK " + owner + "." + name + want.descriptorString());
+        return 1;
     }
 }

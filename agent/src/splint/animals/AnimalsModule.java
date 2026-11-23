@@ -8,6 +8,7 @@ import splint.animals.AnimalOps.Place;
 import splint.core.command.ModuleCommand;
 import splint.core.module.SplintModule;
 import splint.core.patch.Patcher.Patch;
+import splint.core.patch.Patcher.Field;
 import splint.core.patch.Patcher.Redirect;
 import zombie.characters.IsoPlayer;
 
@@ -26,8 +27,10 @@ public final class AnimalsModule implements SplintModule {
     private static final String HOOKS = "splint/animals/AnimalHooks";
 
     private static final List<Patch> PATCHES = List.of(
-            // Identity: restored IDs observed and de-duplicated; ID moves tracked by the index.
+            // Identity: restored IDs observed; an animal's ID is claimed in the index when it enters
+            // the world (never while deserialising, when the previous holder may still exist).
             new Patch(ANIMAL, "load", "(Ljava/nio/ByteBuffer;IZ)V", HOOKS, "load"),
+            new Patch(ANIMAL, "addToWorld", "()V", HOOKS, "addToWorld"),
             new Patch(ANIMAL, "setAnimalID", "(I)V", HOOKS, "setAnimalID"),
             new Patch(ANIMAL, "copyFrom", "(Lzombie/characters/animals/IsoAnimal;)V", HOOKS, "copyFrom"),
             new Patch("zombie/characters/animals/datas/AnimalData", "grow", "(Ljava/lang/String;)V", HOOKS, "grow"),
@@ -49,12 +52,18 @@ public final class AnimalsModule implements SplintModule {
 
     /**
      * Vanilla's only source of new animal IDs is {@code this.animalId = Rand.Next(10000)} in
-     * IsoAnimal.init. That expression now calls {@link AnimalIds#next(zombie.characters.animals.IsoAnimal)}:
-     * no random ID is ever generated, and the new animal is indexed under its ID at once.
+     * IsoAnimal.init. That expression now calls {@link AnimalIds#next(zombie.characters.animals.IsoAnimal, int)}:
+     * on the server (and single player) no random ID is ever generated and the new animal is
+     * indexed under its ID at once; a multiplayer client keeps vanilla's value, which the
+     * server's own ID overwrites.
      */
     private static final List<Redirect> REDIRECTS = List.of(
             new Redirect(ANIMAL, "init", "(Lzombie/characters/animals/datas/AnimalBreed;)V",
                     "zombie/core/random/Rand", "Next", "(I)I", "animalId", "splint/animals/AnimalIds", "next", true));
+
+    /** Per-animal state (failure tracking), read on every update as a plain field. */
+    static final String STATE_FIELD = "splint$animals";
+    private static final List<Field> FIELDS = List.of(new Field(ANIMAL, STATE_FIELD, "Ljava/lang/Object;"));
 
     private static final List<ModuleCommand> COMMANDS = List.of(new AnimalCommands());
 
@@ -73,6 +82,9 @@ public final class AnimalsModule implements SplintModule {
     public List<Redirect> redirects() { return REDIRECTS; }
 
     @Override
+    public List<Field> fields() { return FIELDS; }
+
+    @Override
     public List<ModuleCommand> commands() { return COMMANDS; }
 
     @Override
@@ -80,24 +92,19 @@ public final class AnimalsModule implements SplintModule {
         return "animals: " + AnimalIds.status() + " indexedIds=" + AnimalIndex.size() + " frozen=" + Quarantine.frozen().size();
     }
 
-    private static List<Found> snapshot = List.of();
-    private static long snapshotAt;
-
-    /** Loaded animals within 30 squares of the player, by place. */
+    /** Loaded animals within 30 squares of each player, by place: one scan for all players. */
     @Override
-    public String aboutPlayer(IsoPlayer p) {
-        // One enumeration per command, not one per player: /splint players on a 100-player
-        // server asks this 100 times in a row.
-        long now = System.currentTimeMillis();
-        if (now - snapshotAt > 1000) {
-            snapshot = AnimalOps.all(null);
-            snapshotAt = now;
+    public Map<IsoPlayer, String> aboutPlayers(List<IsoPlayer> players) {
+        List<Found> animals = AnimalOps.all(null);
+        Map<IsoPlayer, String> out = new java.util.IdentityHashMap<>();
+        for (IsoPlayer p : players) {
+            int px = (int) p.getX(), py = (int) p.getY();
+            Map<Place, Integer> near = new EnumMap<>(Place.class);
+            for (Found f : animals) {
+                if (Math.abs(f.x() - px) <= 30 && Math.abs(f.y() - py) <= 30) near.merge(f.place(), 1, Integer::sum);
+            }
+            out.put(p, near.isEmpty() ? "none within 30" : near + " within 30");
         }
-        int px = (int) p.getX(), py = (int) p.getY();
-        Map<Place, Integer> near = new EnumMap<>(Place.class);
-        for (Found f : snapshot) {
-            if (Math.abs(f.x() - px) <= 30 && Math.abs(f.y() - py) <= 30) near.merge(f.place(), 1, Integer::sum);
-        }
-        return near.isEmpty() ? "none within 30" : near + " within 30";
+        return out;
     }
 }

@@ -1,11 +1,9 @@
 package splint.core.command;
 
 import java.lang.invoke.MethodHandle;
-import java.lang.invoke.MethodHandles;
-import java.lang.invoke.MethodType;
 import java.util.Arrays;
 import java.util.regex.Pattern;
-import splint.core.patch.Patcher;
+import splint.core.patch.Originals;
 import splint.core.log.Log;
 import zombie.commands.CommandBase;
 
@@ -17,19 +15,11 @@ public final class CommandHooks {
     private static final Pattern SPLINT = Pattern.compile("^splint\\b", Pattern.CASE_INSENSITIVE);
     // Separate holders: each resolves only when its own (applied) patch first runs.
     private static final class Find {
-        static final MethodHandle H = original("findCommandCls", MethodType.methodType(Class.class, String.class));
+        static final MethodHandle H = Originals.statik(CommandBase.class, "findCommandCls", Class.class, String.class);
     }
 
     private static final class SubClasses {
-        static final MethodHandle H = original("getSubClasses", MethodType.methodType(Class[].class));
-    }
-
-    private static MethodHandle original(String name, MethodType type) {
-        try {
-            return MethodHandles.publicLookup().findStatic(CommandBase.class, Patcher.ORIGINAL_PREFIX + name, type);
-        } catch (ReflectiveOperationException e) {
-            throw new IllegalStateException(e);
-        }
+        static final MethodHandle H = Originals.statik(CommandBase.class, "getSubClasses", Class[].class);
     }
 
     private CommandHooks() {}

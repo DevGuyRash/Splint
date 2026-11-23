@@ -8,7 +8,8 @@ import java.util.ArrayList;
 import java.util.List;
 import splint.core.log.Incidents;
 import splint.core.log.Log;
-import splint.core.patch.Patcher;
+import splint.core.Threads;
+import splint.core.patch.Originals;
 import splint.core.world.World;
 import zombie.characters.animals.IsoAnimal;
 import zombie.iso.IsoCell;
@@ -29,22 +30,23 @@ import zombie.iso.objects.IsoHutch;
 public final class AnimalHooks {
     // Each original resolves in its own holder, initialised on that hook's first call only, so a
     // patch that failed to apply (say after a game update) cannot break the others.
-    private static final class Load { static final MethodHandle H = original(IsoAnimal.class, "load", void.class, ByteBuffer.class, int.class, boolean.class); }
-    private static final class SetId { static final MethodHandle H = original(IsoAnimal.class, "setAnimalID", void.class, int.class); }
-    private static final class CopyFrom { static final MethodHandle H = original(IsoAnimal.class, "copyFrom", void.class, IsoAnimal.class); }
-    private static final class Update { static final MethodHandle H = original(IsoAnimal.class, "update", void.class); }
-    private static final class Sounds { static final MethodHandle H = original(IsoAnimal.class, "updateLoopingSounds", void.class); }
-    private static final class RemoveFromWorld { static final MethodHandle H = original(IsoAnimal.class, "removeFromWorld", void.class); }
-    private static final class Delete { static final MethodHandle H = original(IsoAnimal.class, "delete", void.class); }
-    private static final class Unloaded { static final MethodHandle H = original(IsoAnimal.class, "unloaded", void.class); }
-    private static final class HutchUpdate { static final MethodHandle H = original(IsoHutch.class, "update", void.class); }
-    private static final class ChunkUnload { static final MethodHandle H = original("zombie.characters.animals.AnimalPopulationManager",
+    private static final class Load { static final MethodHandle H = Originals.virtual(IsoAnimal.class, "load", void.class, ByteBuffer.class, int.class, boolean.class); }
+    private static final class SetId { static final MethodHandle H = Originals.virtual(IsoAnimal.class, "setAnimalID", void.class, int.class); }
+    private static final class CopyFrom { static final MethodHandle H = Originals.virtual(IsoAnimal.class, "copyFrom", void.class, IsoAnimal.class); }
+    private static final class Update { static final MethodHandle H = Originals.virtual(IsoAnimal.class, "update", void.class); }
+    private static final class Sounds { static final MethodHandle H = Originals.virtual(IsoAnimal.class, "updateLoopingSounds", void.class); }
+    private static final class RemoveFromWorld { static final MethodHandle H = Originals.virtual(IsoAnimal.class, "removeFromWorld", void.class); }
+    private static final class Delete { static final MethodHandle H = Originals.virtual(IsoAnimal.class, "delete", void.class); }
+    private static final class Unloaded { static final MethodHandle H = Originals.virtual(IsoAnimal.class, "unloaded", void.class); }
+    private static final class HutchUpdate { static final MethodHandle H = Originals.virtual(IsoHutch.class, "update", void.class); }
+    private static final class ChunkUnload { static final MethodHandle H = Originals.virtual("zombie.characters.animals.AnimalPopulationManager",
             "removeChunkFromWorld", void.class, IsoChunk.class); }
-    private static final class Virtualize { static final MethodHandle H = original("zombie.characters.animals.AnimalPopulationManager",
+    private static final class Virtualize { static final MethodHandle H = Originals.virtual("zombie.characters.animals.AnimalPopulationManager",
             "virtualizeAnimal", void.class, IsoAnimal.class); }
-    private static final class Grow { static final MethodHandle H = original(zombie.characters.animals.datas.AnimalData.class,
+    private static final class AddToWorld { static final MethodHandle H = Originals.virtual(IsoAnimal.class, "addToWorld", void.class); }
+    private static final class Grow { static final MethodHandle H = Originals.virtual(zombie.characters.animals.datas.AnimalData.class,
             "grow", void.class, String.class); }
-    private static final class SaveReal { static final MethodHandle H = original("zombie.characters.animals.AnimalManagerMain",
+    private static final class SaveReal { static final MethodHandle H = Originals.virtual("zombie.characters.animals.AnimalManagerMain",
             "saveRealAnimals", void.class); }
 
     /** The animal whose grow() is running: its next stage may take over its ID. */
@@ -66,9 +68,10 @@ public final class AnimalHooks {
     // --- identity ---------------------------------------------------------------------------
 
     /**
-     * An animal restored from a save keeps its ID, and the counter moves past it. If another
-     * live animal already carries that ID (two animals saved with the same vanilla random ID),
-     * the newcomer gets a fresh one here, before anything can confuse the two.
+     * An animal restored from a save keeps its ID, and the counter moves past it. Deserialising
+     * is not the moment to judge duplicates: picking an animal up, grabbing it from a trailer or
+     * a hutch all deserialise a copy while the original is still in the world. Load may also run
+     * on the chunk loader thread. The ID is claimed when the animal enters the world instead.
      */
     public static void load(IsoAnimal self, ByteBuffer input, int worldVersion, boolean isDebugSave) throws Throwable {
         boolean outer = !AnimalIds.isLoading();
@@ -78,9 +81,18 @@ public final class AnimalHooks {
         } finally {
             if (outer) AnimalIds.loading(false);
         }
-        int id = self.getAnimalID();
-        AnimalIds.observe(id);
-        claim(self, id, "loaded");
+        if (AnimalIds.authoritative()) AnimalIds.observe(self.getAnimalID());
+    }
+
+    /**
+     * Every way an animal becomes a world animal ends here: realised from the population, left
+     * or released from a hutch, unloaded from a trailer, dropped. This is where its ID is claimed:
+     * if a different live animal already has it (two animals saved with the same vanilla ID),
+     * this one gets a fresh ID before anything can confuse the two.
+     */
+    public static void addToWorld(IsoAnimal self) throws Throwable {
+        AddToWorld.H.invokeExact(self);
+        if (AnimalIds.authoritative() && !AnimalOps.isGhost(self)) Threads.onMain(() -> claim(self, self.getAnimalID(), "entering the world"));
     }
 
     /**
@@ -90,13 +102,19 @@ public final class AnimalHooks {
      * ID instead: duplicates cannot be created, not just repaired.
      */
     public static void setAnimalID(IsoAnimal self, int id) throws Throwable {
+        if (!AnimalIds.authoritative() || !Threads.isMain()) {
+            SetId.H.invokeExact(self, id);
+            if (AnimalIds.authoritative()) Threads.onMain(() -> AnimalIndex.put(self.getAnimalID(), self));
+            return;
+        }
         int old = self.getAnimalID();
         IsoAnimal holder = AnimalIndex.get(id);
         if (holder != null && holder != self && holder != growing && AnimalIndex.isLive(holder)) {
             int fresh = AnimalIds.allocate();
             AnimalStats.DUPLICATE_IDS_PREVENTED.incrementAndGet();
             AnimalOps.incident("setAnimalID(" + id + ") would duplicate; gave " + fresh, self);
-            Log.problem("duplicate-id-set", "setAnimalID(" + id + ") would give " + AnimalOps.brief(self) + " the id of live "
+            int asked = id;
+            Log.problem("duplicate-id-set", () -> "setAnimalID(" + asked + ") would give " + AnimalOps.brief(self) + " the id of live "
                     + AnimalOps.describe(holder) + "; assigned " + fresh + " instead", null);
             id = fresh;
         }
@@ -107,20 +125,28 @@ public final class AnimalHooks {
 
     /** copyFrom moves an animal's identity to a new object (dropping, trailer unloading). */
     public static void copyFrom(IsoAnimal self, IsoAnimal source) throws Throwable {
+        int allocated = self.getAnimalID();
         CopyFrom.H.invokeExact(self, source);
-        AnimalIndex.put(self.getAnimalID(), self);
+        if (!AnimalIds.authoritative()) return;
+        int id = self.getAnimalID();
+        Threads.onMain(() -> {
+            if (allocated != id) AnimalIndex.remove(allocated, self);
+            AnimalIndex.put(id, self);
+        });
     }
 
     /** Indexes {@code self} under {@code id}, giving it a fresh ID if a different live animal has that one. */
     private static void claim(IsoAnimal self, int id, String how) {
+        if (id < 0) return;
         IsoAnimal other = AnimalIndex.get(id);
         if (other != null && other != self && AnimalIndex.isLive(other) && !sameIndividual(other, self)) {
             int fresh = AnimalIds.allocate();
             self.setAnimalID(fresh);                 // through the hook above: re-indexes self
             AnimalStats.DUPLICATE_IDS_FIXED.incrementAndGet();
-            AnimalOps.incident("duplicate id " + id + " re-assigned (" + how + ")", self);
-            Log.problem("duplicate-id", "animal " + how + " with id " + id + " that another live animal already has; gave it id "
-                    + fresh + ": " + AnimalOps.describe(self) + " | other: " + AnimalOps.describe(other), null);
+            boolean full = Log.problem("duplicate-id", () -> "animal " + how + " with id " + id
+                    + " that another live animal already has; gave it id " + fresh + ": " + AnimalOps.describe(self)
+                    + " | other: " + AnimalOps.describe(other), null);
+            AnimalOps.incident("duplicate id re-assigned (" + how + ")", self, full);
             return;
         }
         AnimalIndex.put(id, self);
@@ -141,6 +167,7 @@ public final class AnimalHooks {
      */
     public static boolean checkForChickenpocalypse(IsoAnimal self, IsoAnimal replacing) {
         if (self.getAdef() == null) return false;                   // constructor: ID not assigned yet
+        if (!AnimalIds.authoritative()) return false;               // a client never deletes over IDs
         int id = self.getAnimalID();
         IsoAnimal other = AnimalIndex.get(id);
         if (other == null || other == self || other == replacing || !AnimalIndex.isLive(other)) {
@@ -151,7 +178,7 @@ public final class AnimalHooks {
         }
         if (sameIndividual(other, self)) {
             AnimalOps.incident("duplicate copy removed", other);
-            Log.problem("duplicate-copy", "removed a second object of the same animal (shared data/genome): "
+            Log.problem("duplicate-copy", () -> "removed a second object of the same animal (shared data/genome): "
                     + AnimalOps.describe(other) + " | kept: " + AnimalOps.describe(self), null);
             AnimalOps.detach(other);
             AnimalIndex.put(id, self);
@@ -185,7 +212,7 @@ public final class AnimalHooks {
                         replacing.setAnimalID(fresh);
                         AnimalStats.DUPLICATE_IDS_FIXED.incrementAndGet();
                         AnimalOps.incident("unindexed duplicate id " + id + " at growth; next stage got " + fresh, replacing);
-                        Log.problem("duplicate-id-unindexed", "growing animal shares id " + id + " with "
+                        Log.problem("duplicate-id-unindexed", () -> "growing animal shares id " + id + " with "
                                 + AnimalOps.describe(o) + " (not in the ID index); next stage got id " + fresh, null);
                         return;
                     }
@@ -226,7 +253,7 @@ public final class AnimalHooks {
             self.setMovingSquareNow();
             AnimalStats.WATER_RELOCATIONS.incrementAndGet();
             AnimalOps.incident("moved off water", self);
-            Log.problem("water-relocation", "animal " + (constructing ? "created" : "growing") + " on water at " + from
+            Log.problem("water-relocation", () -> "animal " + (constructing ? "created" : "growing") + " on water at " + from
                     + " moved to land " + land.getX() + "," + land.getY() + "," + land.getZ()
                     + " (vanilla leaves an uninitialised animal that stops the world update)", null);
             return false;
@@ -295,7 +322,7 @@ public final class AnimalHooks {
             AnimalStats.HUTCH_FAILURES.incrementAndGet();
             Incidents.record(AnimalsModule.ID, "hutch update threw " + t.getClass().getSimpleName(),
                     self.savedX, self.savedY, self.savedZ, "hutch(" + self.getAnimalInside().size() + " inside)");
-            Log.problem("hutch-update:" + t.getClass().getName(), "hutch at " + World.where(self.savedX, self.savedY, self.savedZ)
+            Log.problem("hutch-update:" + t.getClass().getName(), () -> "hutch at " + World.where(self.savedX, self.savedY, self.savedZ)
                     + " (" + self.getAnimalInside().size() + " animals inside) threw during update; contained", t);
         }
     }
@@ -314,13 +341,13 @@ public final class AnimalHooks {
         } catch (Throwable t) {
             AnimalStats.REMOVAL_FAILURES.incrementAndGet();
             AnimalOps.incident("removal threw, completed", self);
-            Log.problem("removeFromWorld:" + t.getClass().getName(), "removing animal from the world threw; finished the removal: "
+            Log.problem("removeFromWorld:" + t.getClass().getName(), () -> "removing animal from the world threw; finished the removal: "
                     + AnimalOps.describe(self), t);
             AnimalOps.detach(self);
         }
     }
 
-    /** delete() is the end of an animal object; its ID leaves the index (unless taken over). */
+    /** delete() always finishes, even for an animal whose definition is missing. */
     public static void delete(IsoAnimal self) {
         try {
             Delete.H.invokeExact(self);
@@ -329,11 +356,10 @@ public final class AnimalHooks {
         } catch (Throwable t) {
             AnimalStats.REMOVAL_FAILURES.incrementAndGet();
             AnimalOps.incident("delete threw, completed", self);
-            Log.problem("delete:" + t.getClass().getName(), "deleting animal threw; finished the removal: "
+            Log.problem("delete:" + t.getClass().getName(), () -> "deleting animal threw; finished the removal: "
                     + AnimalOps.describe(self), t);
             AnimalOps.detach(self);
         }
-        AnimalIndex.remove(self.getAnimalID(), self);
     }
 
     public static void unloaded(IsoAnimal self) {
@@ -343,7 +369,7 @@ public final class AnimalHooks {
         } catch (VirtualMachineError e) {
             throw e;
         } catch (Throwable t) {
-            Log.problem("unloaded:" + t.getClass().getName(), "animal unload bookkeeping threw; contained: "
+            Log.problem("unloaded:" + t.getClass().getName(), () -> "animal unload bookkeeping threw; contained: "
                     + AnimalOps.describe(self), t);
         }
     }
@@ -351,8 +377,7 @@ public final class AnimalHooks {
     /**
      * Chunk unload hands every animal on the chunk to the population manager, which turns them
      * into virtual animals. A ghost there makes unloaded() throw (getData().getAttachedTree()),
-     * which abandons the rest of the chunk's unload, so ghosts go first. The unloaded animals'
-     * objects are finished with, so their IDs leave the index.
+     * which abandons the rest of the chunk's unload, so ghosts go first.
      */
     public static void removeChunkFromWorld(Object manager, IsoChunk chunk) throws Throwable {
         List<IsoAnimal> animals = null;
@@ -377,14 +402,13 @@ public final class AnimalHooks {
                     if (AnimalOps.isGhost(a)) AnimalOps.removeGhost(a, "chunk unload");
                     // Vanilla's population worker drops an animal whose ID repeats within a
                     // virtual group, so a duplicate must be fixed before it is virtualised.
-                    else claim(a, a.getAnimalID(), "unloading");
+                    else if (AnimalIds.authoritative() && Threads.isMain()) claim(a, a.getAnimalID(), "unloading");
                 }
             }
         } catch (Throwable t) {
             Log.problem("chunk-unload-sweep", "ghost sweep before chunk unload failed", t);
         }
         ChunkUnload.H.invoke(manager, chunk);
-        if (animals != null) for (IsoAnimal a : animals) AnimalIndex.remove(a.getAnimalID(), a);
     }
 
     public static void virtualizeAnimal(Object manager, IsoAnimal animal) throws Throwable {
@@ -393,7 +417,6 @@ public final class AnimalHooks {
             return;
         }
         Virtualize.H.invoke(manager, animal);
-        AnimalIndex.remove(animal.getAnimalID(), animal);
     }
 
     /** The population save serialises every animal in the update list; a ghost there throws. */
@@ -412,23 +435,4 @@ public final class AnimalHooks {
         SaveReal.H.invoke(manager);
     }
 
-    // --- plumbing ---------------------------------------------------------------------------
-
-    private static MethodHandle original(Class<?> owner, String name, Class<?> ret, Class<?>... params) {
-        try {
-            return MethodHandles.publicLookup().findVirtual(owner, Patcher.ORIGINAL_PREFIX + name, MethodType.methodType(ret, params));
-        } catch (ReflectiveOperationException e) {
-            throw new IllegalStateException("Splint patch for " + owner.getName() + "." + name + " is not applied", e);
-        }
-    }
-
-    private static MethodHandle original(String owner, String name, Class<?> ret, Class<?>... params) {
-        try {
-            Class<?> cls = Class.forName(owner);
-            return MethodHandles.privateLookupIn(cls, MethodHandles.lookup())
-                    .findVirtual(cls, Patcher.ORIGINAL_PREFIX + name, MethodType.methodType(ret, params));
-        } catch (ReflectiveOperationException e) {
-            throw new IllegalStateException("Splint patch for " + owner + "." + name + " is not applied", e);
-        }
-    }
 }

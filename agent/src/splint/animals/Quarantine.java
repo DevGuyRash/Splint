@@ -4,6 +4,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.WeakHashMap;
+import splint.core.ObjectSlot;
 import splint.core.log.Log;
 import zombie.characters.animals.IsoAnimal;
 
@@ -13,12 +14,15 @@ import zombie.characters.animals.IsoAnimal;
  * <p>Vanilla lets the exception escape into the world update, which abandons the rest of the
  * frame (every other object, timed actions, player stats, Lua ticks) and retries the same
  * animal next frame, forever. Here the failure is caught and logged with the animal's
- * location. After {@link #FAILURES_TO_FREEZE} failures in a row the animal is frozen: it
- * stays where it is but is not updated, and it is retried after a back-off (1 min, doubling,
- * capped at 30 min) in case the cause was transient. Admins can list, release or kill frozen
- * animals with {@code /splint animals frozen}.
+ * location. After {@link #FAILURES_TO_FREEZE} failures in a row the animal is frozen: it stays
+ * where it is but is not updated, and is retried after a back-off (1 min, doubling, capped at
+ * 30 min) in case the cause was transient. Admins list, release or remove frozen animals with
+ * {@code /splint animals frozen}.
+ *
+ * <p>State lives in a field Splint adds to IsoAnimal, so the per-tick checks are one field read
+ * whether or not other animals have failed. Main thread only.
  */
-public final class Quarantine {
+final class Quarantine {
     static final int FAILURES_TO_FREEZE = 3;
     private static final long FIRST_FREEZE_MS = 60_000;
     private static final long MAX_FREEZE_MS = 30 * 60_000;
@@ -30,77 +34,74 @@ public final class Quarantine {
         String lastError = "";
     }
 
-    private static final Map<IsoAnimal, State> STATES = new WeakHashMap<>();
-    /** Fast path for the per-tick checks: no lock and no map lookup while nothing has failed. */
-    private static volatile boolean any;
+    private static final class Slot {
+        static final ObjectSlot S = ObjectSlot.of(IsoAnimal.class, AnimalsModule.STATE_FIELD);
+    }
+
+    /** Animals with state, for listing; only touched on failures and admin commands. */
+    private static final Map<IsoAnimal, Boolean> FAILING = new WeakHashMap<>();
 
     private Quarantine() {}
 
-    public static boolean isFrozen(IsoAnimal a) {
-        if (!any) return false;
-        synchronized (Quarantine.class) {
-            State s = STATES.get(a);
-            return s != null && s.frozenUntil > System.currentTimeMillis();
-        }
+    static boolean isFrozen(IsoAnimal a) {
+        Object s = Slot.S.get(a);
+        return s != null && ((State) s).frozenUntil > System.currentTimeMillis();
     }
 
-    public static void succeeded(IsoAnimal a) {
-        if (!any) return;
-        synchronized (Quarantine.class) {
-            succeededLocked(a);
-            any = !STATES.isEmpty();
-        }
+    static void succeeded(IsoAnimal a) {
+        Object s = Slot.S.get(a);
+        if (s == null) return;
+        if (((State) s).frozenUntil != 0) Log.info("frozen animal updated normally again; releasing: " + AnimalOps.describe(a));
+        release(a);
     }
 
-    private static void succeededLocked(IsoAnimal a) {
-        State s = STATES.get(a);
-        if (s != null && s.frozenUntil == 0) STATES.remove(a);
-        else if (s != null) {
-            Log.info("frozen animal updated normally again; releasing: " + AnimalOps.describe(a));
-            STATES.remove(a);
-        }
-    }
-
-    public static void failed(IsoAnimal a, String phase, Throwable t) {
+    static void failed(IsoAnimal a, String phase, Throwable t) {
         AnimalStats.UPDATE_FAILURES.incrementAndGet();
+        State s = (State) Slot.S.get(a);
+        if (s == null) {
+            s = new State();
+            Slot.S.set(a, s);
+            FAILING.put(a, Boolean.TRUE);
+        }
+        s.consecutive++;
+        s.lastError = String.valueOf(t);
         String detail;
         boolean froze = false;
-        synchronized (Quarantine.class) {
-            State s = STATES.computeIfAbsent(a, k -> new State());
-            any = true;
-            s.consecutive++;
-            s.lastError = String.valueOf(t);
-            if (s.consecutive >= FAILURES_TO_FREEZE) {
-                s.frozenUntil = System.currentTimeMillis() + s.freezeMs;
-                detail = "frozen for " + s.freezeMs / 1000 + "s after " + s.consecutive + " failures in a row";
-                s.freezeMs = Math.min(MAX_FREEZE_MS, s.freezeMs * 2);
-                s.consecutive = 0;
-                froze = true;
-            } else {
-                detail = "failure " + s.consecutive + " of " + FAILURES_TO_FREEZE + " before freezing";
-            }
+        if (s.consecutive >= FAILURES_TO_FREEZE) {
+            s.frozenUntil = System.currentTimeMillis() + s.freezeMs;
+            detail = "frozen for " + s.freezeMs / 1000 + "s after " + s.consecutive + " failures in a row";
+            s.freezeMs = Math.min(MAX_FREEZE_MS, s.freezeMs * 2);
+            s.consecutive = 0;
+            froze = true;
+        } else {
+            detail = "failure " + s.consecutive + " of " + FAILURES_TO_FREEZE + " before freezing";
         }
-        AnimalOps.incident(phase + " threw " + t.getClass().getSimpleName() + (froze ? ", frozen" : ""), a);
+        String kind = phase + " threw " + t.getClass().getSimpleName() + (froze ? ", frozen" : "");
         String key = "animal-" + phase + ":" + t.getClass().getName() + ":" + firstLine(t.getMessage());
-        Log.problem("ERROR", key, "animal " + phase + " threw " + t + "; contained, world update continues; " + detail
-                + "; " + AnimalOps.describe(a), froze ? null : t);
+        String d = detail;
+        boolean full = Log.problem("ERROR", key, () -> "animal " + phase + " threw " + t + "; contained, world update continues; "
+                + d + "; " + AnimalOps.describe(a), froze ? null : t);
+        AnimalOps.incident(kind, a, full);
     }
 
-    public static synchronized List<IsoAnimal> frozen() {
+    static List<IsoAnimal> frozen() {
         List<IsoAnimal> out = new ArrayList<>();
         long now = System.currentTimeMillis();
-        STATES.forEach((a, s) -> { if (s.frozenUntil > now) out.add(a); });
+        for (IsoAnimal a : new ArrayList<>(FAILING.keySet())) {
+            Object s = Slot.S.get(a);
+            if (s != null && ((State) s).frozenUntil > now) out.add(a);
+        }
         return out;
     }
 
-    public static synchronized String lastError(IsoAnimal a) {
-        State s = STATES.get(a);
-        return s == null ? "" : s.lastError;
+    static String lastError(IsoAnimal a) {
+        Object s = Slot.S.get(a);
+        return s == null ? "" : ((State) s).lastError;
     }
 
-    public static synchronized void release(IsoAnimal a) {
-        STATES.remove(a);
-        any = !STATES.isEmpty();
+    static void release(IsoAnimal a) {
+        Slot.S.set(a, null);
+        FAILING.remove(a);
     }
 
     private static String firstLine(String s) {

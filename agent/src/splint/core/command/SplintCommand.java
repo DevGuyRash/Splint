@@ -25,13 +25,15 @@ import zombie.core.raknet.UdpConnection;
 
 /**
  * {@code /splint ...}, the one game command Splint adds. It works from the server console,
- * RCON and in-game chat (admins only), answers only the admin who ran it, and routes
- * {@code /splint <name>} to the module command of that name.
+ * RCON and in-game chat, answers only the admin who ran it, and routes {@code /splint <name>}
+ * to the module command of that name. In game it needs ChangeAndReloadServerOptions, which the
+ * default roles give to admins but not to moderators: these commands remove animals and show
+ * every player's position.
  */
 @CommandName(name = "splint")
 @CommandArgs(varArgs = true)
 @CommandHelp(helpText = "Splint fixes and admin tools. /splint help", shouldTranslated = false)
-@RequiredCapability(requiredCapability = Capability.AnimalCheats)
+@RequiredCapability(requiredCapability = Capability.ChangeAndReloadServerOptions)
 public class SplintCommand extends CommandBase {
     private static final int PLAYER_LIST_LIMIT = 60;
 
@@ -129,8 +131,7 @@ public class SplintCommand extends CommandBase {
         for (var e : Incidents.topCells(5)) {
             String[] xy = e.getKey().split(",");
             List<String> who = World.playersInCell(Integer.parseInt(xy[0]), Integer.parseInt(xy[1]));
-            b.append("\n  cell ").append(e.getKey()).append(": ").append(e.getValue()).append(" (apop_")
-                    .append(xy[0]).append('_').append(xy[1]).append(".bin) players there now: ")
+            b.append("\n  cell ").append(e.getKey()).append(": ").append(e.getValue()).append(" players there now: ")
                     .append(who.isEmpty() ? "none" : String.join(",", who));
         }
         b.append("\nLatest ").append(n).append(':');
@@ -145,16 +146,21 @@ public class SplintCommand extends CommandBase {
         if (online.isEmpty()) return "No players online.";
         StringBuilder b = new StringBuilder(online.size() + " players online");
         if (area != null) b.append(", showing those ").append(area.label());
+        List<IsoPlayer> shownPlayers = new ArrayList<>();
         int shown = 0;
         for (IsoPlayer p : online) {
+            if (area != null && !area.area().contains((int) p.getX(), (int) p.getY(), (int) p.getZ())) continue;
+            if (shown++ < PLAYER_LIST_LIMIT) shownPlayers.add(p);
+        }
+        List<Map<IsoPlayer, String>> about = new ArrayList<>();
+        for (SplintModule m : Modules.active()) about.add(m.aboutPlayers(shownPlayers));
+        for (IsoPlayer p : shownPlayers) {
             int px = (int) p.getX(), py = (int) p.getY(), pz = (int) p.getZ();
-            if (area != null && !area.area().contains(px, py, pz)) continue;
-            if (shown++ >= PLAYER_LIST_LIMIT) continue;
             b.append('\n').append(p.getUsername()).append(" at ").append(px).append(',').append(py).append(',').append(pz)
                     .append(" cell ").append(World.cell(px)).append(',').append(World.cell(py));
-            for (SplintModule m : Modules.active()) {
-                String about = m.aboutPlayer(p);
-                if (!about.isEmpty()) b.append(' ').append(m.id()).append(": ").append(about);
+            for (int i = 0; i < about.size(); i++) {
+                String s = about.get(i).get(p);
+                if (s != null && !s.isEmpty()) b.append(' ').append(Modules.active().get(i).id()).append(": ").append(s);
             }
         }
         if (shown > PLAYER_LIST_LIMIT) b.append("\n... ").append(shown - PLAYER_LIST_LIMIT).append(" more");

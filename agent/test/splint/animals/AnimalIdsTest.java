@@ -51,11 +51,11 @@ public final class AnimalIdsTest {
     static void crashLosesOnlyUnusedReservation() throws Exception {
         Path w = world();
         AnimalIds.resetForTest(w);
-        AnimalIds.allocate();                            // reserves 10000..10999 on disk
+        AnimalIds.allocate();                            // reserves 10000..19999 on disk
         String onDisk = Files.readString(w.resolve("splint/animal-ids.txt"));
-        check("counter file records the reservation end: " + onDisk.strip(), onDisk.contains("next=11000"));
+        check("counter file records the reservation end: " + onDisk.strip(), onDisk.contains("next=20000"));
         AnimalIds.resetForTest(w);                       // crash: no shutdown hook ran
-        check("restart after crash continues at the reservation end", AnimalIds.allocate() == 11_000);
+        check("restart after crash continues at the reservation end", AnimalIds.allocate() == 20_000);
     }
 
     static void loadedIdsMoveTheCounter() throws Exception {

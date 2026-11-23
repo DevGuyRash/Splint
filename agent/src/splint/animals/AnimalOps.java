@@ -88,8 +88,17 @@ public final class AnimalOps {
 
     /** Records an incident about {@code a} for /splint problems. */
     static void incident(String kind, IsoAnimal a) {
-        Incidents.record(AnimalsModule.ID, kind, (int) Math.floor(a.getX()), (int) Math.floor(a.getY()),
-                (int) Math.floor(a.getZ()), brief(a));
+        incident(kind, a, true);
+    }
+
+    /**
+     * Records an incident about {@code a} for /splint problems. With {@code detailed} false only
+     * the totals are counted (no player lookups): for repeats the log already rate-limits.
+     */
+    static void incident(String kind, IsoAnimal a, boolean detailed) {
+        int x = (int) Math.floor(a.getX()), y = (int) Math.floor(a.getY());
+        if (detailed) Incidents.record(AnimalsModule.ID, kind, x, y, (int) Math.floor(a.getZ()), brief(a));
+        else Incidents.count(AnimalsModule.ID, kind, x, y);
     }
 
     /** "chick#10421" (or "GHOST" for an uninitialised animal): short enough for lists. */
@@ -246,7 +255,9 @@ public final class AnimalOps {
      * holder would keep updating (and saving) them.
      */
     public static void removeGhost(IsoAnimal a, String where) {
-        String what = describe(a);
+        // Described before it is detached, but only if the log will print it.
+        boolean full = Log.problem("ghost-removed:" + where, () -> "removed uninitialised animal (" + where + "): " + describe(a), null);
+        incident("ghost removed (" + where + ")", a, full);
         quietly(() -> {
             BaseVehicle v = a.getVehicle();
             if (v != null) v.animals.remove(a);
@@ -258,10 +269,8 @@ public final class AnimalOps {
                 if (item instanceof AnimalInventoryItem ai && ai.getAnimal() == a) removeCarried(ai);
             }
         });
-        incident("ghost removed (" + where + ")", a);
         detach(a);
         AnimalStats.GHOSTS_REMOVED.incrementAndGet();
-        Log.problem("ghost-removed:" + where, "removed uninitialised animal (" + where + "): " + what, null);
     }
 
     /** Kills (removes) one animal wherever it is. Returns a short reason when it could not. */

@@ -37,7 +37,7 @@ public final class IntWeakMap<T> {
         }
         keys[slot] = key;
         values[slot] = new WeakReference<>(value);
-        if (++size * 2 > keys.length) rehash(keys.length * 2);
+        if (++size * 2 > keys.length) grow();
     }
 
     /** Removes {@code key} only while it maps to {@code value} (or to a collected value). */
@@ -74,6 +74,17 @@ public final class IntWeakMap<T> {
             keys[s] = k;
             values[s] = v;
         }
+    }
+
+    /**
+     * Rebuilds from the entries whose values are still alive; the table only doubles when the
+     * survivors alone would fill it past half. Churn (animals created and dropped) therefore
+     * cannot grow it without bound.
+     */
+    private void grow() {
+        int alive = 0;
+        for (int i = 0; i < keys.length; i++) if (keys[i] != EMPTY && values[i].get() != null) alive++;
+        rehash(alive * 4 > keys.length ? keys.length * 2 : keys.length);
     }
 
     private void rehash(int capacity) {

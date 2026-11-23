@@ -196,6 +196,8 @@ final class AnimalCommands implements ModuleCommand {
         }
         ctx.requireMainThread();
         StringBuilder audit = new StringBuilder();
+        // The animal that keeps each ID stays the index's holder of it.
+        for (List<Found> group : byId.values()) if (group.size() > 1) AnimalIndex.put(group.get(0).animal().getAnimalID(), group.get(0).animal());
         for (Found f : toFix) {
             int old = f.animal().getAnimalID();
             int fresh = AnimalIds.allocate();

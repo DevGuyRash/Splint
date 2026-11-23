@@ -5,6 +5,7 @@ import splint.core.Counters;
 
 /** The animals module's counters (shown by /splint status). */
 final class AnimalStats {
+    static final AtomicLong IDS_ASSIGNED = c("idsAssigned");
     static final AtomicLong DUPLICATE_IDS_FIXED = c("duplicateIdsFixed");
     static final AtomicLong DUPLICATE_IDS_PREVENTED = c("duplicateIdsPrevented");
     static final AtomicLong DUPLICATE_COPIES_REMOVED = c("duplicateCopiesRemoved");

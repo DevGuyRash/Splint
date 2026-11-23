@@ -50,26 +50,54 @@ public final class Patcher {
     /**
      * Inside {@code owner.method}, replaces a static call {@code callOwner.callName callDesc}
      * whose result is stored straight into the field {@code storeField} of the class, with a
-     * call to the static {@code newOwner.newName}. With {@code passThis} the original call's
-     * arguments are dropped and the receiver ({@code this}) is passed instead, so the
-     * replacement knows which object the value is for; its descriptor is then
-     * {@code (Lowner;)R}, otherwise it is {@code callDesc}.
+     * call to the static {@code newOwner.newName}. With {@code passThis} the receiver
+     * ({@code this}) is passed first, followed by the original argument, so the replacement
+     * knows which object the value is for and can still do what vanilla did: its descriptor is
+     * then {@code (Lowner;A)R} for {@code callDesc (A)R}. passThis supports calls with no
+     * argument or one single-slot argument.
      * Used where vanilla computes a value badly in one expression (the animal ID) and the fix
      * is to compute it correctly there, not to overwrite it afterwards.
      */
     public record Redirect(String owner, String method, String methodDesc, String callOwner, String callName,
                            String callDesc, String storeField, String newOwner, String newName, boolean passThis) {
+        public Redirect {
+            if (passThis) {
+                MethodTypeDesc d = MethodTypeDesc.ofDescriptor(callDesc);
+                if (d.parameterCount() > 1 || (d.parameterCount() == 1 && TypeKind.from(d.parameterType(0)).slotSize() != 1)) {
+                    throw new IllegalArgumentException("passThis redirect needs at most one single-slot argument: " + callDesc);
+                }
+            }
+        }
+
         public String key() { return owner + "." + method + methodDesc + "@" + callOwner + "." + callName; }
+    }
+
+    /** A public field Splint adds to a game class (see {@code splint.core.ObjectSlot}). */
+    public record Field(String owner, String name, String descriptor) {
+        public String key() { return owner + "#" + name; }
     }
 
     private Patcher() {}
 
     /** Returns the rewritten class, or {@code null} when none of the patches apply to it. */
-    public static byte[] apply(byte[] classBytes, List<Patch> patches, Set<String> applied) {
-        return apply(classBytes, patches, List.of(), applied);
+    public static byte[] apply(byte[] classBytes, List<Patch> patches, List<Redirect> redirects, Set<String> applied) {
+        return apply(classBytes, patches, redirects, List.of(), applied);
     }
 
-    public static byte[] apply(byte[] classBytes, List<Patch> patches, List<Redirect> redirects, Set<String> applied) {
+    /**
+     * Rewrites one class. {@code applied} receives the keys of what was applied, but only once
+     * the whole class transformed successfully.
+     */
+    public static byte[] apply(byte[] classBytes, List<Patch> patches, List<Redirect> redirects, List<Field> fields,
+                               Set<String> applied) {
+        Set<String> done = new HashSet<>();
+        byte[] out = transform(classBytes, patches, redirects, fields, done);
+        if (out != null) applied.addAll(done);
+        return out;
+    }
+
+    private static byte[] transform(byte[] classBytes, List<Patch> patches, List<Redirect> redirects, List<Field> fields,
+                                    Set<String> applied) {
         ClassFile cf = ClassFile.of();
         ClassModel model = cf.parse(classBytes);
         Map<String, Patch> byKey = new java.util.HashMap<>();
@@ -81,9 +109,9 @@ public final class Patcher {
             String key = m.methodName().stringValue() + m.methodType().stringValue();
             if (byKey.containsKey(key) || redirectsByMethod.containsKey(key)) present.add(key);
         }
-        if (present.isEmpty()) return null;
+        if (present.isEmpty() && fields.isEmpty()) return null;
         ClassDesc owner = model.thisClass().asSymbol();
-        ClassTransform transform = (cb, element) -> {
+        ClassTransform methods = (cb, element) -> {
             if (!(element instanceof MethodModel method)) {
                 cb.with(element);
                 return;
@@ -140,7 +168,14 @@ public final class Patcher {
             });
             applied.add(patch.owner() + "." + key);
         };
-        return cf.transformClass(model, transform);
+        ClassTransform withFields = methods.andThen(ClassTransform.endHandler(cb -> {
+            for (Field f : fields) {
+                cb.withField(f.name(), ClassDesc.ofDescriptor(f.descriptor()),
+                        ClassFile.ACC_PUBLIC | ClassFile.ACC_SYNTHETIC | ClassFile.ACC_TRANSIENT);
+                applied.add(f.key());
+            }
+        }));
+        return cf.transformClass(model, withFields);
     }
 
     /**
@@ -153,6 +188,8 @@ public final class Patcher {
         private final Set<String> applied;
         private java.lang.classfile.instruction.InvokeInstruction held;
         private Redirect heldFor;
+        /** Markers (line numbers, labels) seen after the held call, replayed in order. */
+        private final List<java.lang.classfile.CodeElement> markers = new ArrayList<>();
 
         RedirectCalls(List<Redirect> redirects, ClassDesc owner, Set<String> applied) {
             this.redirects = redirects;
@@ -163,34 +200,19 @@ public final class Patcher {
         @Override
         public void accept(java.lang.classfile.CodeBuilder b, java.lang.classfile.CodeElement e) {
             if (held != null && !(e instanceof java.lang.classfile.Instruction)) {
-                b.with(e);           // line numbers and other markers do not break the match
+                markers.add(e);
                 return;
             }
             if (held != null) {
-                Redirect r = heldFor;
-                java.lang.classfile.instruction.InvokeInstruction call = held;
+                boolean stores = e instanceof java.lang.classfile.instruction.FieldInstruction f
+                        && f.opcode() == java.lang.classfile.Opcode.PUTFIELD
+                        && f.owner().asSymbol().equals(owner) && f.name().equalsString(heldFor.storeField());
+                if (stores) emitReplacement(b, held, heldFor);
+                else b.with(held);
+                markers.forEach(b::with);
+                markers.clear();
                 held = null;
                 heldFor = null;
-                if (e instanceof java.lang.classfile.instruction.FieldInstruction f
-                        && f.opcode() == java.lang.classfile.Opcode.PUTFIELD
-                        && f.owner().asSymbol().equals(owner) && f.name().equalsString(r.storeField())) {
-                    if (r.passThis()) {
-                        // Drop the original arguments (stack top, last argument first).
-                        var params = call.typeSymbol().parameterList();
-                        for (int k = params.size() - 1; k >= 0; k--) {
-                            if (TypeKind.from(params.get(k)).slotSize() == 2) b.pop2();
-                            else b.pop();
-                        }
-                        b.aload(0);
-                        b.invokestatic(ClassDesc.ofInternalName(r.newOwner()), r.newName(),
-                                MethodTypeDesc.of(call.typeSymbol().returnType(), owner));
-                    } else {
-                        b.invokestatic(ClassDesc.ofInternalName(r.newOwner()), r.newName(), call.typeSymbol());
-                    }
-                    applied.add(r.key());
-                } else {
-                    b.with(call);
-                }
             }
             if (e instanceof java.lang.classfile.instruction.InvokeInstruction inv
                     && inv.opcode() == java.lang.classfile.Opcode.INVOKESTATIC) {
@@ -206,9 +228,28 @@ public final class Patcher {
             b.with(e);
         }
 
+        private void emitReplacement(java.lang.classfile.CodeBuilder b, java.lang.classfile.instruction.InvokeInstruction call,
+                                     Redirect r) {
+            MethodTypeDesc type = call.typeSymbol();
+            if (r.passThis()) {
+                // Stack: [... this(for putfield), arg?]. Put `this` under the argument so the
+                // replacement receives (owner, arg): aload_0; swap. One single-slot argument at
+                // most (checked when the redirect is declared).
+                b.aload(0);
+                if (type.parameterCount() == 1) b.swap();
+                List<ClassDesc> params = new ArrayList<>();
+                params.add(owner);
+                params.addAll(type.parameterList());
+                type = MethodTypeDesc.of(type.returnType(), params.toArray(ClassDesc[]::new));
+            }
+            b.invokestatic(ClassDesc.ofInternalName(r.newOwner()), r.newName(), type);
+            applied.add(r.key());
+        }
+
         @Override
         public void atEnd(java.lang.classfile.CodeBuilder b) {
             if (held != null) b.with(held);
+            markers.forEach(b::with);
         }
     }
 

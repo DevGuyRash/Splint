@@ -9,7 +9,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.concurrent.ThreadLocalRandom;
-import java.util.concurrent.atomic.AtomicLong;
 import zombie.characters.animals.IsoAnimal;
 import splint.core.log.Log;
 
@@ -31,11 +30,11 @@ import splint.core.log.Log;
 public final class AnimalIds {
     /** Vanilla IDs are 0..9999; Splint never issues those. */
     public static final int FIRST = 10_000;
-    private static final int BLOCK = 1_000;
+    /** IDs reserved per write of the counter file (one fsync per block). */
+    private static final int BLOCK = 10_000;
     /** IDs above this are not followed by the counter (leaves room for 1e9 more IDs). */
     private static final int OBSERVE_LIMIT = 2_000_000_000;
 
-    private static final AtomicLong ASSIGNED = splint.core.Counters.of("animals", "idsAssigned");
     private static boolean loaded;
     private static int next;
     private static int reservedUntil;
@@ -50,15 +49,22 @@ public final class AnimalIds {
 
     /**
      * Replaces vanilla's {@code this.animalId = Rand.Next(10000)} in IsoAnimal.init, the one
-     * place the game generates an animal ID: the new animal gets the next unique ID and is
-     * indexed under it. During a load no ID is consumed, because load restores the saved one
-     * right after init returns.
+     * place the game generates an animal ID. Where this process is authoritative (server,
+     * single player) the new animal gets the next unique ID and is indexed under it. A
+     * multiplayer client keeps vanilla's value ({@code Rand.Next(vanillaBound)}), which the
+     * server's ID overwrites. During a load no ID is consumed: load restores the saved one.
      */
-    public static int next(IsoAnimal animal) {
+    public static int next(IsoAnimal animal, int vanillaBound) {
+        if (!authoritative()) return zombie.core.random.Rand.Next(vanillaBound);
         if (LOADING.get()) return -1;
         int id = allocate();
-        AnimalIndex.put(id, animal);
+        splint.core.Threads.onMain(() -> AnimalIndex.put(id, animal));
         return id;
+    }
+
+    /** False on a multiplayer client, where the server owns animal IDs. */
+    static boolean authoritative() {
+        return !zombie.network.GameClient.client;
     }
 
     /** Runs {@code load} with ID allocation suspended, then records the restored ID. */
@@ -79,7 +85,7 @@ public final class AnimalIds {
             next = FIRST;
             reserve();
         }
-        ASSIGNED.incrementAndGet();
+        AnimalStats.IDS_ASSIGNED.incrementAndGet();
         return id;
     }
 
@@ -102,9 +108,14 @@ public final class AnimalIds {
         return "nextAnimalId=" + next + " reservedUntil=" + reservedUntil + " file=" + file;
     }
 
+    /** The save the counter belongs to; a different save (single player) reloads it. */
+    private static String loadedFor;
+
     private static void ensureLoaded() {
-        if (loaded) return;
+        String save = saveDirOverride != null ? saveDirOverride.toString() : zombie.core.Core.gameSaveWorld;
+        if (loaded && java.util.Objects.equals(save, loadedFor)) return;
         loaded = true;
+        loadedFor = save;
         next = FIRST;
         try {
             file = saveDirOverride != null ? saveDirOverride.resolve("splint/animal-ids.txt")

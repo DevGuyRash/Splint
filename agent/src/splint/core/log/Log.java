@@ -47,15 +47,20 @@ public final class Log {
 
     /**
      * Logs a problem that may repeat: ERROR when an exception was contained, WARN when Splint
-     * found and repaired a bad state. Returns how often {@code key} has been seen.
+     * found and repaired a bad state. The message is only built when it will be written, so
+     * callers can describe the object involved without paying for it on suppressed repeats.
+     * Returns true when this occurrence was written in full (the first few per key).
      */
-    public static long problem(String key, String message, Throwable t) {
+    public static boolean problem(String key, java.util.function.Supplier<String> message, Throwable t) {
         return problem(t != null ? "ERROR" : "WARN", key, message, t);
     }
 
-    public static long problem(String level, String key, String message, Throwable t) {
-        // Numbers in keys (indices, coordinates, IDs) would make every occurrence unique.
-        Counter c = COUNTERS.computeIfAbsent(key.replaceAll("-?\\d+", "#"), k -> new Counter());
+    public static boolean problem(String key, String message, Throwable t) {
+        return problem(t != null ? "ERROR" : "WARN", key, () -> message, t);
+    }
+
+    public static boolean problem(String level, String key, java.util.function.Supplier<String> message, Throwable t) {
+        Counter c = COUNTERS.computeIfAbsent(stableKey(key), k -> new Counter());
         long now = System.currentTimeMillis();
         long total;
         boolean full;
@@ -77,12 +82,27 @@ public final class Log {
             }
         }
         if (full) {
-            write(level, message + " [occurrence " + total + "]", t);
+            write(level, message.get() + " [occurrence " + total + "]", t);
             if (total == FULL_REPORTS_PER_KEY) write("WARN", "further '" + key + "' reports are summarised once a minute", null);
         } else if (summary) {
-            write(level, message + " [" + suppressed + " more since last summary, " + total + " total]", null);
+            write(level, message.get() + " [" + suppressed + " more since last summary, " + total + " total]", null);
         }
-        return total;
+        return full;
+    }
+
+    /** Digits (indices, coordinates, IDs) would make every occurrence its own key. */
+    static String stableKey(String key) {
+        StringBuilder b = null;
+        for (int i = 0; i < key.length(); i++) {
+            char ch = key.charAt(i);
+            if (ch >= '0' && ch <= '9') {
+                if (b == null) b = new StringBuilder(key.length()).append(key, 0, i);
+                if (b.length() == 0 || b.charAt(b.length() - 1) != '#') b.append('#');
+            } else if (b != null) {
+                b.append(ch);
+            }
+        }
+        return b == null ? key : b.toString();
     }
 
     /** For the transformer: never touches game code, never throws. */

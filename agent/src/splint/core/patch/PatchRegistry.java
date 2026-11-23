@@ -19,28 +19,42 @@ import splint.core.patch.Patcher.Redirect;
  * that applies them as the game's classes load. {@code /splint status} reads it.
  */
 public final class PatchRegistry {
-    private record Declared(String module, Patch patch, Redirect redirect) {
-        String owner() { return patch != null ? patch.owner() : redirect.owner(); }
-        String key() { return patch != null ? patch.owner() + "." + patch.name() + patch.descriptor() : redirect.key(); }
-    }
+    private record Declared(String module, String owner, String key) {}
 
     private static final List<Declared> DECLARED = new ArrayList<>();
     private static final Set<String> APPLIED = ConcurrentHashMap.newKeySet();
     private static final Set<String> LOADED = ConcurrentHashMap.newKeySet();
+    /** Target classes that were already loaded when the agent started, so cannot be patched. */
+    private static final Set<String> TOO_EARLY = ConcurrentHashMap.newKeySet();
 
     private PatchRegistry() {}
 
     public static synchronized void install(List<SplintModule> modules, Instrumentation inst) {
         Map<String, List<Patch>> patches = new HashMap<>();
         Map<String, List<Redirect>> redirects = new HashMap<>();
+        Map<String, List<Patcher.Field>> fields = new HashMap<>();
         for (SplintModule m : modules) {
             for (Patch p : m.patches()) {
-                DECLARED.add(new Declared(m.id(), p, null));
+                DECLARED.add(new Declared(m.id(), p.owner(), p.owner() + "." + p.name() + p.descriptor()));
                 patches.computeIfAbsent(p.owner(), k -> new ArrayList<>()).add(p);
             }
             for (Redirect r : m.redirects()) {
-                DECLARED.add(new Declared(m.id(), null, r));
+                DECLARED.add(new Declared(m.id(), r.owner(), r.key()));
                 redirects.computeIfAbsent(r.owner(), k -> new ArrayList<>()).add(r);
+            }
+            for (Patcher.Field f : m.fields()) {
+                DECLARED.add(new Declared(m.id(), f.owner(), f.key()));
+                fields.computeIfAbsent(f.owner(), k -> new ArrayList<>()).add(f);
+            }
+        }
+        Set<String> targets = new java.util.HashSet<>(patches.keySet());
+        targets.addAll(redirects.keySet());
+        targets.addAll(fields.keySet());
+        for (Class<?> c : inst.getAllLoadedClasses()) {
+            String n = c.getName().replace('.', '/');
+            if (targets.contains(n)) {
+                TOO_EARLY.add(n);
+                Log.boot(n + " was loaded before Splint; its patches cannot apply", null);
             }
         }
         inst.addTransformer(new ClassFileTransformer() {
@@ -50,11 +64,12 @@ public final class PatchRegistry {
                 if (name == null) return null;
                 List<Patch> ps = patches.getOrDefault(name, List.of());
                 List<Redirect> rs = redirects.getOrDefault(name, List.of());
-                if (ps.isEmpty() && rs.isEmpty()) return null;
+                List<Patcher.Field> fs = fields.getOrDefault(name, List.of());
+                if (ps.isEmpty() && rs.isEmpty() && fs.isEmpty()) return null;
                 LOADED.add(name);
                 byte[] out;
                 try {
-                    out = Patcher.apply(bytes, ps, rs, APPLIED);
+                    out = Patcher.apply(bytes, ps, rs, fs, APPLIED);
                 } catch (Throwable t) {
                     // Never take the game down over a patch: that class runs unpatched.
                     Log.boot("could not patch " + name + "; running it unpatched", t);
@@ -62,7 +77,7 @@ public final class PatchRegistry {
                 }
                 // The JVM discards a transformer's result if it throws, so report only
                 // through the boot log, which cannot throw or call back into game code.
-                Log.boot("patched " + name.replace('/', '.') + " (" + (ps.size() + rs.size()) + " change(s))", null);
+                Log.boot("patched " + name.replace('/', '.') + " (" + (ps.size() + rs.size() + fs.size()) + " change(s))", null);
                 return out;
             }
         });
@@ -79,14 +94,24 @@ public final class PatchRegistry {
     public static synchronized List<String> missing() {
         List<String> out = new ArrayList<>();
         for (Declared d : DECLARED) {
-            if (LOADED.contains(d.owner()) && !APPLIED.contains(d.key())) out.add(d.module() + ": " + d.key());
+            boolean seen = LOADED.contains(d.owner()) || TOO_EARLY.contains(d.owner());
+            if (seen && !APPLIED.contains(d.key())) out.add(d.module() + ": " + d.key());
         }
         return out;
     }
 
-    /** "16 of 16 patches applied, none missing" (or the missing list). */
+    /** Declared patches whose class has not loaded yet (normal early on; they apply when it does). */
+    public static synchronized int pending() {
+        int n = 0;
+        for (Declared d : DECLARED) if (!LOADED.contains(d.owner()) && !TOO_EARLY.contains(d.owner())) n++;
+        return n;
+    }
+
+    /** "21 of 21 patches applied, none missing" (or pending / missing details). */
     public static String summary() {
         List<String> missing = missing();
-        return applied() + " of " + total() + " patches applied" + (missing.isEmpty() ? ", none missing" : ", MISSING " + missing);
+        int pending = pending();
+        return applied() + " of " + total() + " patches applied" + (pending > 0 ? " (" + pending + " waiting for their class to load)" : "")
+                + (missing.isEmpty() ? ", none missing" : ", MISSING " + missing);
     }
 }

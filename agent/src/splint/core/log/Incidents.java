@@ -43,6 +43,17 @@ public final class Incidents {
 
     private Incidents() {}
 
+    /**
+     * Counts an occurrence without the details (no player lookups): for repeats that the log
+     * already rate-limits. Kind and cell totals stay exact.
+     */
+    public static void count(String module, String kind, int x, int y) {
+        synchronized (Incidents.class) {
+            BY_KIND.merge(module + ": " + Log.stableKey(kind), 1L, Long::sum);
+            BY_CELL.merge(World.cell(x) + "," + World.cell(y), 1L, Long::sum);
+        }
+    }
+
     public static void record(String module, String kind, int x, int y, int z, String subject) {
         try {
             IsoPlayer near = World.nearestPlayer(x, y);
@@ -52,7 +63,7 @@ public final class Incidents {
             synchronized (Incidents.class) {
                 RECENT.addFirst(i);
                 while (RECENT.size() > KEEP) RECENT.removeLast();
-                BY_KIND.merge(module + ": " + kind.replaceAll("-?\\d+", "#"), 1L, Long::sum);
+                BY_KIND.merge(module + ": " + Log.stableKey(kind), 1L, Long::sum);
                 BY_CELL.merge(i.cellX() + "," + i.cellY(), 1L, Long::sum);
             }
         } catch (Throwable ignored) {
