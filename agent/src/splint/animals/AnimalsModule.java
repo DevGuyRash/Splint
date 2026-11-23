@@ -44,7 +44,8 @@ public final class AnimalsModule implements SplintModule {
             // Population bookkeeping that serialises or virtualises every animal it is handed.
             new Patch(POPULATION, "removeChunkFromWorld", "(Lzombie/iso/IsoChunk;)V", HOOKS, "removeChunkFromWorld", true),
             new Patch(POPULATION, "virtualizeAnimal", "(Lzombie/characters/animals/IsoAnimal;)V", HOOKS, "virtualizeAnimal", true),
-            new Patch(MANAGER, "saveRealAnimals", "()V", HOOKS, "saveRealAnimals", true));
+            new Patch(MANAGER, "saveRealAnimals", "()V", HOOKS, "saveRealAnimals", true),
+            new Patch("zombie/characters/animals/VirtualAnimal", "save", "(Ljava/nio/ByteBuffer;)V", HOOKS, "herdSave", true));
 
     /**
      * Vanilla's only source of new animal IDs is {@code this.animalId = Rand.Next(10000)} in

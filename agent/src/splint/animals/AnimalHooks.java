@@ -3,6 +3,7 @@ package splint.animals;
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
+import java.lang.invoke.VarHandle;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
@@ -49,6 +50,19 @@ public final class AnimalHooks {
             "grow", void.class, String.class); }
     private static final class SaveReal { static final MethodHandle H = Originals.virtual("zombie.characters.animals.AnimalManagerMain",
             "saveRealAnimals", void.class); }
+    private static final class HerdSave {
+        static final MethodHandle H = Originals.virtual("zombie.characters.animals.VirtualAnimal", "save", void.class, ByteBuffer.class);
+        /** VirtualAnimal.animals is package-private; both classes live in the unnamed module. */
+        static final VarHandle ANIMALS;
+        static {
+            try {
+                Class<?> herd = Class.forName("zombie.characters.animals.VirtualAnimal");
+                ANIMALS = MethodHandles.privateLookupIn(herd, MethodHandles.lookup()).findVarHandle(herd, "animals", ArrayList.class);
+            } catch (ReflectiveOperationException e) {
+                throw new IllegalStateException("VirtualAnimal.animals not found", e);
+            }
+        }
+    }
 
     /** The animal whose grow() is running: its next stage may take over its ID. */
     private static IsoAnimal growing;
@@ -446,6 +460,32 @@ public final class AnimalHooks {
             if (ghosts != null) for (IsoAnimal a : ghosts) AnimalOps.removeGhost(a, "save");
         }
         SaveReal.H.invoke(manager);
+    }
+
+    /**
+     * Last line of defence for the population save. VirtualAnimal.save writes the herd's animal
+     * count and then each animal, and IsoAnimal.save throws on an animal without data. In vanilla
+     * one such animal aborts the whole save: the console still says "World saved", but the
+     * animals after it are never written and a shutdown save never finishes. Splint keeps ghosts
+     * from forming and sweeps them before unload and save; this drops any that still reach a
+     * herd (from a source nobody has found yet) before the herd is counted, so the file stays
+     * consistent. Runs on the population worker thread and touches only the herd being saved.
+     */
+    public static void herdSave(Object herd, ByteBuffer out) throws Throwable {
+        @SuppressWarnings("unchecked")
+        ArrayList<IsoAnimal> animals = (ArrayList<IsoAnimal>) HerdSave.ANIMALS.get(herd);
+        if (animals != null) {
+            for (int i = animals.size() - 1; i >= 0; i--) {
+                IsoAnimal a = animals.get(i);
+                if (a == null || AnimalOps.isGhost(a)) {
+                    animals.remove(i);
+                    AnimalStats.GHOSTS_REMOVED.incrementAndGet();
+                    Log.problem("WARN", "ghost-dropped-at-save", () -> "dropped an uninitialised animal from a herd being saved "
+                            + "(it would have aborted the save): " + (a == null ? "null entry" : AnimalOps.brief(a)), null);
+                }
+            }
+        }
+        HerdSave.H.invoke(herd, out);
     }
 
 }

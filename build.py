@@ -116,6 +116,12 @@ def smoke(agent: Path, jar: Path, strict: bool) -> None:
     targets = subprocess.run(["java", "-cp", f"{agent}{os.pathsep}{jar}", str(ROOT / "tools/ListTargets.java")],
                              check=True, capture_output=True, text=True).stdout.split()
     subprocess.run([str(jre), f"-javaagent:{agent}", "-cp", f"{tools}{os.pathsep}{jar}", "AgentSmoke", *targets], check=True)
+    # Behaviour checks: every tools/*Check.java runs in the game's JRE with the agent attached and
+    # fails the build by exiting non-zero. A module adds one by adding a file.
+    for check in sorted((ROOT / "tools").glob("*Check.java")):
+        subprocess.run(["javac", "--release", "25", "-d", str(tools), str(check)], check=True)
+        subprocess.run([str(jre), f"-javaagent:{agent}", "--enable-native-access=ALL-UNNAMED", "-cp",
+                        f"{tools}{os.pathsep}{jar}", check.stem], check=True)
 
 
 if __name__ == "__main__":
