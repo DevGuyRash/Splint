@@ -24,6 +24,13 @@ public final class Splint {
         if (!started) {
             started = true;
             Log.gameStarted();
+            for (SplintModule m : Modules.active()) {
+                try {
+                    m.start();
+                } catch (Throwable t) {
+                    Log.error("module " + m.id() + " failed to start", t);
+                }
+            }
             nextSummary = now + SUMMARY_MS;
             Log.info("Splint " + VERSION + " active: " + PatchRegistry.summary() + "; modules "
                     + Modules.active().stream().map(SplintModule::id).toList());

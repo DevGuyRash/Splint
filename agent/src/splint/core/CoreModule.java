@@ -46,10 +46,13 @@ public final class CoreModule implements SplintModule {
         return List.of(new Field(MOVING, splint.core.isolate.Breaker.FIELD, "Ljava/lang/Object;"));
     }
 
-    @Override
-    public List<ModuleCommand> commands() { return COMMANDS; }
+    /** Created on first use, never in premain (see SplintModule). */
+    private static final class Commands {
+        static final List<ModuleCommand> ALL = List.of(new splint.core.isolate.FrozenCommand());
+    }
 
-    private static final List<ModuleCommand> COMMANDS = List.of(new splint.core.isolate.FrozenCommand());
+    @Override
+    public List<ModuleCommand> commands() { return Commands.ALL; }
 
     @Override
     public List<Patch> patches() {

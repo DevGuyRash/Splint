@@ -16,8 +16,12 @@ import splint.core.patch.Patcher.Redirect;
  * switched off with {@code -Dsplint.disable=id1,id2} (or only some enabled with
  * {@code -Dsplint.modules=id1,id2}).
  *
- * <p>Methods are called once, from the agent's premain, except {@link #tick} (main game
- * thread, once per world update) and {@link #status} (when an admin asks).
+ * <p>Lifecycle: the module is constructed, and {@link #patches}, {@link #redirects},
+ * {@link #fields} and {@link #callSites} are read, in the agent's premain, before any game
+ * class may load. Those must touch no game class (not even by creating objects whose code
+ * mentions one: the JVM's verifier loads classes to check assignments), or that class loads
+ * unpatched. Everything that needs game classes happens in {@link #start} (first world update,
+ * main thread) or later: {@link #tick}, {@link #commands}, {@link #status}.
  */
 public interface SplintModule {
     /** Short lowercase identifier, also the default command name: "animals". */
@@ -41,7 +45,10 @@ public interface SplintModule {
     /** Fields to add to game classes, for per-object state (see {@link splint.core.ObjectSlot}). */
     default List<splint.core.patch.Patcher.Field> fields() { return List.of(); }
 
-    /** Admin commands, reachable as {@code /splint <name> ...}. */
+    /** Called once, on the main thread, at the first world update: runtime wiring goes here. */
+    default void start() {}
+
+    /** Admin commands, reachable as {@code /splint <name> ...}. Called after start, never in premain. */
     default List<ModuleCommand> commands() { return List.of(); }
 
     /** Called on the main thread once per world update; must be cheap. */

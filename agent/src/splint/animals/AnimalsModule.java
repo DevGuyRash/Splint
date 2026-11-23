@@ -1,10 +1,7 @@
 package splint.animals;
 
-import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
-import splint.animals.AnimalOps.Found;
-import splint.animals.AnimalOps.Place;
 import splint.core.command.ModuleCommand;
 import splint.core.module.SplintModule;
 import splint.core.patch.Patcher.Patch;
@@ -61,13 +58,14 @@ public final class AnimalsModule implements SplintModule {
                     "zombie/core/random/Rand", "Next", "(I)I", "animalId", "splint/animals/AnimalIds", "next", true));
 
 
-    private static final List<ModuleCommand> COMMANDS = List.of(new AnimalCommands());
+    /** Created on first use, never in premain (see SplintModule). */
+    private static final class Commands {
+        static final List<ModuleCommand> ALL = List.of(new AnimalCommands());
+    }
 
-    public AnimalsModule() {
-        // By name: this runs in premain, before IsoAnimal may be loaded (it must load patched).
-        splint.core.isolate.Describers.register(ID, "zombie.characters.animals.IsoAnimal",
-                o -> AnimalOps.describe((zombie.characters.animals.IsoAnimal) o),
-                o -> AnimalOps.brief((zombie.characters.animals.IsoAnimal) o));
+    @Override
+    public void start() {
+        AnimalDescriber.register();
     }
 
     @Override
@@ -85,26 +83,15 @@ public final class AnimalsModule implements SplintModule {
     public List<Redirect> redirects() { return REDIRECTS; }
 
     @Override
-    public List<ModuleCommand> commands() { return COMMANDS; }
+    public List<ModuleCommand> commands() { return Commands.ALL; }
 
     @Override
     public String status() {
         return "animals: " + AnimalIds.status() + " indexedIds=" + AnimalIndex.size() + " frozen=" + AnimalCommands.frozenAnimals().size();
     }
 
-    /** Loaded animals within 30 squares of each player, by place: one scan for all players. */
     @Override
     public Map<IsoPlayer, String> aboutPlayers(List<IsoPlayer> players) {
-        List<Found> animals = AnimalOps.all(null);
-        Map<IsoPlayer, String> out = new java.util.IdentityHashMap<>();
-        for (IsoPlayer p : players) {
-            int px = (int) p.getX(), py = (int) p.getY();
-            Map<Place, Integer> near = new EnumMap<>(Place.class);
-            for (Found f : animals) {
-                if (Math.abs(f.x() - px) <= 30 && Math.abs(f.y() - py) <= 30) near.merge(f.place(), 1, Integer::sum);
-            }
-            out.put(p, near.isEmpty() ? "none within 30" : near + " within 30");
-        }
-        return out;
+        return AnimalPlayerInfo.near(players);
     }
 }

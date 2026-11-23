@@ -75,6 +75,23 @@ def main() -> None:
     if a.verify:
         subprocess.run(["java", "-cp", f"{out}{os.pathsep}{jar}", str(ROOT / "tools/VerifyPatches.java"), str(jar)],
                        check=True)
+        smoke(out, jar)
+
+
+def smoke(agent: Path, jar: Path) -> None:
+    """Loads every patch target in the game's own JRE with the agent attached."""
+    jre = jar.parent.parent / "jre64/bin/java"          # <server>/java/projectzomboid.jar
+    if not jre.exists():
+        jre = jar.parent / "jre64/bin/java"              # <client>/projectzomboid.jar
+    if not jre.exists():
+        print("agent smoke test skipped: no game JRE next to", jar)
+        return
+    tools = ROOT / "build/tools"
+    tools.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["javac", "--release", "25", "-d", str(tools), str(ROOT / "tools/AgentSmoke.java")], check=True)
+    targets = subprocess.run(["java", "-cp", f"{agent}{os.pathsep}{jar}", str(ROOT / "tools/ListTargets.java")],
+                             check=True, capture_output=True, text=True).stdout.split()
+    subprocess.run([str(jre), f"-javaagent:{agent}", "-cp", f"{tools}{os.pathsep}{jar}", "AgentSmoke", *targets], check=True)
 
 
 if __name__ == "__main__":
