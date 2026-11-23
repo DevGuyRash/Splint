@@ -6,11 +6,11 @@ The first module, `animals`, targets the animal failure that leaves a multiplaye
 
 What it does today:
 
-- **Unique animal IDs, generated correctly.** Vanilla's only source of new animal IDs is `this.animalId = Rand.Next(10000)` in `IsoAnimal.init`: a random number from 0 to 9999 with no uniqueness check. A 460-animal test farm held 8 to 13 duplicate pairs. Splint replaces that expression with a per-world allocator: IDs start at 10000, only increase, and are persisted in the save in reserved blocks, so restarts and crashes never reuse one.
+- **Unique animal IDs, generated correctly.** Vanilla's only source of new animal IDs is `this.animalId = Rand.Next(10000)` in `IsoAnimal.init`: a random number from 0 to 9999 with no uniqueness check. A 460-animal test farm held 8 to 15 duplicate pairs; 5,000 animals held about 900. Splint replaces that expression with a per-world allocator: IDs start at 10000, only increase, and are persisted in the save in reserved blocks, so restarts and crashes never reuse one.
 - **O(1) duplicate checks.** Vanilla's duplicate check scans the 8×8 squares around every newly built animal, allocating a list per square, and cannot see a duplicate 5 squares away. Splint keeps an ID index, a primitive `int`-keyed open-addressing hash table with weak values, so every check is one lookup across the whole server. Duplicates are refused when set, repaired when an animal from an old save enters the world, and fixed before a chunk unloads (vanilla's population worker silently drops an animal whose ID repeats in the herd it joins).
 - **No half-built animals.** Vanilla can leave an animal with no type, data or ID in the world: when it is created on a water square, or with an unknown type, or by its own duplicate check. One such animal throws on every frame and stops the whole world update. Splint moves animals created on water to the nearest land, removes ghosts it finds, and makes animal removal always complete.
 - **Failure isolation for every object.** The update scheduler's per-object calls (preupdate, frameStep, update, postupdate) run one object at a time: an exception from any animal, zombie, vehicle or player is caught, logged with its location and the players nearby, and the world keeps running. An object that keeps failing is frozen in place and retried with back-off; `/splint frozen` lists and releases them. Animal sound updates and hutch updates are isolated too.
-- **No silent animal loss.** When an animal grows next to another animal with the same ID, vanilla deletes both the animal and its next stage. Splint keeps both and gives the newcomer a fresh ID.
+- **No silent animal loss.** When an animal grows next to another animal with the same ID, vanilla deletes both the animal and its next stage, without a word in the log. In the lab, vanilla lost 10 of 2,000 and 19 of 5,000 growing animals this way; with Splint, 0 of 2,000 and 0 of 5,000.
 - **Logging for admins, not players.** Every problem is written with the animal's type, breed, ID, coordinates, map cell, `apop_X_Y.bin` file, chunk, hutch or trailer, age, the nearest player and every player in that map cell. It goes to the server console/stdout and to `Logs/<date>_Splint.txt` next to the game's own logs, with repeats rate limited. Nothing is ever sent to players; command replies go only to the admin who ran them.
 - **Incident history.** `/splint problems` lists what Splint handled since start, the map cells where it happened most, who is in those cells right now, and the latest incidents, so on a 100+ player server you can find the place and the people without guessing.
 - **Admin commands with combinable filters.** `/splint ...` works from the server console, RCON and in-game chat (admins). Every animal command takes the same selection terms, so you can say "chicks in map cell 42,36, but not the ones in hutches" in one command. Destructive commands are dry runs until you add `confirm`, and every removal is logged with the admin's name.
@@ -45,8 +45,10 @@ From the console or RCON, drop the leading slash. In game, `/splint` needs the `
 
 ```
 /splint status                       patch health, ID counter, counters since start
+/splint modules                      loaded modules
 /splint problems [N]                 what Splint handled: by kind, worst map cells (with who is there now), latest N
-/splint players [SELECTION]          online players: position, map cell, animals around them
+/splint players [AREA]               online players: position, map cell, animals around them
+/splint frozen [release] [confirm]   any objects frozen after repeated update errors
 /splint animals census [SELECTION]   counts by map cell, place, type and stage; babies, ghosts, duplicates, frozen
 /splint animals list [SELECTION]     individual animals: ID, type, stage, place, coordinates
 /splint animals find ID              where the animal with this ID is
@@ -93,17 +95,19 @@ All modules are on by default. JVM options (add them next to `-javaagent` in `vm
 
 ## Performance
 
-Speed is a design rule, not an afterthought. On the normal path, the per-animal, per-tick hooks do three field reads and two volatile reads, with no allocation, no lock and no hash lookup. ID checks are O(1) hash lookups with primitive keys. Expensive work (finding players, building log lines, recording incidents) only happens when something went wrong or an admin runs a command. The lab's stress scenarios measure server ticks per second with 2,000 and 5,000 animals, with and without Splint.
+Speed is a design rule, not an afterthought. On the normal path, the per-object, per-tick hooks do a few plain field reads (the circuit breaker's state is a field Splint adds to the object), with no allocation, no lock and no hash lookup. ID checks are O(1) hash lookups with primitive keys. Expensive work (finding players, building log lines, recording incidents) only happens when something went wrong or an admin runs a command, and repeated problems are rate limited before any of it is done.
+
+Measured on the lab server, vanilla and Splint back to back: with 2,000 animals, 5.13 ticks/s vanilla and 5.40 with Splint; with 5,000 animals, 1.1 and 1.0. Both are the same within the measurement's resolution. The slowdown at 5,000 is the game's own animal simulation.
 
 ## Build
 
 Needs a JDK that can target Java 25 and an installed game or dedicated server for the compile classpath.
 
 ```bash
-python3 build.py --verify
+python3 build.py --test --verify
 ```
 
-This writes `dist/splint.jar` and checks every patch against the installed game's bytecode. After a game update, a patch whose method changed is reported as not applied; the server then runs that method unpatched instead of failing.
+This runs the unit tests, writes `dist/splint.jar`, applies every patch to the installed game's bytecode under the JDK verifier, checks that every hook has the exact signature its game method calls, and boots the game's own JRE with the agent to confirm everything applies. After a game update, a patch whose method changed is reported as not applied; the server then runs that method unpatched instead of failing.
 
 ## Test lab (repository only, not shipped)
 
