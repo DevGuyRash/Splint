@@ -259,8 +259,11 @@ public final class AnimalHooks {
         IsoGridSquare sq = self.getSquare();
         if (sq == null || !sq.isWaterSquare()) return false;
         boolean constructing = self.getAdef() == null;
-        // Animals in a trailer, inventory or hutch keep a stale square; leave them to vanilla.
-        if (!constructing && (self.getVehicle() != null || self.getContainer() != null || self.getHutch() != null)) return true;
+        // An animal in a trailer, an inventory or a hutch keeps a stale square it is not standing
+        // on. Vanilla's grow() deletes it (and its next stage) when that square is water; it is
+        // not on water, so it is never deleted for it. Its next stage is built by the constructor,
+        // whose own check (constructing, below) moves that one to land.
+        if (!constructing && (self.getVehicle() != null || self.getContainer() != null || self.getHutch() != null)) return false;
         IsoGridSquare land = nearestLand(sq, 8);
         if (land != null) {
             String from = sq.getX() + "," + sq.getY() + "," + sq.getZ();
