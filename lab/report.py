@@ -43,6 +43,9 @@ def summary(v: dict | None) -> str:
         parts.append(f"{v['lost']} animals lost")
     if "tps_with_animals" in v:
         parts.append(f"ticks/s {v.get('tps_empty')} empty, {v['tps_with_animals']} loaded, {v.get('tps_after_growth')} after growth")
+    if v.get("cpu_ms_per_tick_with_animals") is not None:
+        parts.append(f"server CPU ms/tick {v.get('cpu_ms_per_tick_empty')} empty, {v['cpu_ms_per_tick_with_animals']} loaded, "
+                     f"{v.get('cpu_ms_per_tick_after_growth')} after growth")
     if v.get("player_alive") is False:
         parts.append("**player died** (result invalid)")
     if "all_checks_pass" in v:
