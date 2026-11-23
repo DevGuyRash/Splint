@@ -68,7 +68,7 @@ public final class Quarantine {
             }
         }
         String key = "animal-" + phase + ":" + t.getClass().getName() + ":" + firstLine(t.getMessage());
-        Log.problem(key, "animal " + phase + " threw " + t + "; contained, world update continues; " + detail
+        Log.problem("ERROR", key, "animal " + phase + " threw " + t + "; contained, world update continues; " + detail
                 + "; " + AnimalOps.describe(a), froze ? null : t);
     }
 

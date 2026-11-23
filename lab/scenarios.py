@@ -141,10 +141,12 @@ def force_growth_code(x: int, y: int, r: int, days: int = 400) -> str:
 
 def mass_growth(s: Session) -> dict:
     """Hundreds of juveniles cross their growth age together, as a big farm does after a
-    catch-up. Random 0-9999 IDs make duplicate pairs likely at this size."""
+    catch-up. Random 0-9999 IDs make duplicate pairs likely at this size. Only farm species:
+    wild ones (rabbits) flee from players and despawn on their own, which would read as loss."""
     x, y = here(s)
     s.server("spawn chick - 300 4 0 10 110")
-    s.server("spawn rabkitten - 100 -12 0 6 110")
+    s.server("spawn lamb - 50 -12 0 6 110")
+    s.server("spawn turkeypoult - 50 -12 8 6 110")
     s.server("spawn piglet - 60 0 12 6 130")
     before = census(s, x, y, 40)
     off = s.log_size()
@@ -377,11 +379,47 @@ def grow_near_invalid_ghost(s: Session) -> dict:
     return out
 
 
+def malformed_breed(s: Session) -> dict:
+    """A fully initialised animal whose data is damaged (null breed, as in reports of
+    malformed animals from mods or saves). Its growth throws on every update."""
+    x, y = fresh_spot(s, 600)
+    s.server("spawn chick - 3 3 0 1 0")
+    before = census(s, x, y, 10)
+    off = s.log_size()
+    s.lua(f"local t=SplintLabServer.animalsOnSquares({x},{y},0,10) local a=t[1] a:getData():setBreed(nil) "
+          "a:setHoursSurvived(400*24) a:getData():setAge(400) SplintLabServer.broken=a return a:getAnimalID()")
+    time.sleep(25)
+    out = {"before": before, "lua_alive": heartbeat_alive(s), "stats_frozen": stats_frozen(s)}
+    if out["lua_alive"]:
+        out["after"] = census(s, x, y, 10)
+        if json.loads((s.evidence / "session.json").read_text()).get("agent"):
+            out["frozen"] = console_reply(s, "splint animals frozen")
+    out["exceptions"] = exceptions(s.log_since(off))
+    return out
+
+
+def mass_growth_xl(s: Session) -> dict:
+    """2000 juveniles in a 41x41 square cross their growth age together. Vanilla's 0-9999 IDs
+    give about 2000*1999/2/10000 = 200 duplicate pairs at this size, many of them adjacent."""
+    x, y = fresh_spot(s, -360)
+    s.server("spawn chick - 1500 0 0 20 110", timeout=180)
+    s.server("spawn piglet - 300 0 0 20 130", timeout=120)
+    s.server("spawn lamb - 100 0 0 20 110", timeout=120)
+    s.server("spawn turkeypoult - 100 0 0 20 110", timeout=120)
+    before = census(s, x, y, 25)
+    off = s.log_size()
+    grown = force_growth(s, x, y, 25)
+    time.sleep(40)
+    after = census(s, x, y, 25)
+    return {"before": before, "forced": grown, "after": after, "lost": count(before) - count(after),
+            "exceptions": exceptions(s.log_since(off)), "lua_alive": heartbeat_alive(s)}
+
+
 SCENARIOS = {f.__name__.replace("_", "-"): f for f in
              (mass_growth, duplicate_ids, invalid_type, water_seed, grow_near_ghost, grow_near_invalid_ghost,
-              unload_with_ghost)}
+              malformed_breed, unload_with_ghost)}
 # Needs the agent; run with --only admin-commands.
-EXTRA = {"admin-commands": admin_commands}
+EXTRA = {"admin-commands": admin_commands, "mass-growth-xl": mass_growth_xl}
 # Storage-place growth investigations.
 EXTRA.update({f.__name__.replace('_', '-'): f for f in (inventory_growth, trailer_growth, hutch_growth)})
 
@@ -406,7 +444,7 @@ def start(evidence: Path, agent: str | None) -> Session:
     if agent:
         # A patched run is only evidence if the patch is live in this JVM.
         status = console_reply(s, "splint status", wait=8)
-        if "methods patched" not in status or "IsoAnimal" in status.split("MISSING", 1)[-1:][0] and "MISSING" in status:
+        if "methods patched" not in status or "MISSING" in status:
             raise SystemExit(f"Splint is not active in {evidence}: {status[-400:]}")
         (evidence / "splint-status.txt").write_text(status + "\n")
     return s

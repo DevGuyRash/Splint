@@ -46,10 +46,14 @@ public final class Log {
     public static void error(String message, Throwable t) { write("ERROR", message, t); }
 
     /**
-     * Logs a problem that may repeat. Returns the number of times {@code key} has been seen,
-     * including this one.
+     * Logs a problem that may repeat: ERROR when an exception was contained, WARN when Splint
+     * found and repaired a bad state. Returns how often {@code key} has been seen.
      */
     public static long problem(String key, String message, Throwable t) {
+        return problem(t != null ? "ERROR" : "WARN", key, message, t);
+    }
+
+    public static long problem(String level, String key, String message, Throwable t) {
         // Numbers in keys (indices, coordinates, IDs) would make every occurrence unique.
         Counter c = COUNTERS.computeIfAbsent(key.replaceAll("-?\\d+", "#"), k -> new Counter());
         long now = System.currentTimeMillis();
@@ -73,10 +77,10 @@ public final class Log {
             }
         }
         if (full) {
-            write("ERROR", message + " [occurrence " + total + "]", t);
+            write(level, message + " [occurrence " + total + "]", t);
             if (total == FULL_REPORTS_PER_KEY) write("WARN", "further '" + key + "' reports are summarised once a minute", null);
         } else if (summary) {
-            write("ERROR", message + " [" + suppressed + " more since last summary, " + total + " total]", null);
+            write(level, message + " [" + suppressed + " more since last summary, " + total + " total]", null);
         }
         return total;
     }

@@ -18,7 +18,7 @@ The full investigation, with the reproduced failures, is in [docs/investigation.
 Splint is a Java agent. It rewrites a short list of game methods in memory when the server starts and changes no game files. Workshop mods cannot install Java code, so it is installed once on the server machine.
 
 1. Copy `splint.jar` into the server's `java/` folder (next to `projectzomboid.jar`).
-2. Add `-javaagent:java/splint.jar` to the `vmArgs` list in `ProjectZomboid64.json`. On Windows, edit `ProjectZomboid64.json` the same way.
+2. Add `-javaagent:java/splint.jar` to the `vmArgs` list in `ProjectZomboid64.json` (tested on the Linux dedicated server; the Windows server reads the same file, but has not been tested).
 
    ```json
    "vmArgs": [
@@ -29,7 +29,7 @@ Splint is a Java agent. It rewrites a short list of game methods in memory when 
    ```
 
    If you start the server with your own `java` command line, add the same argument before the main class.
-3. Start the server. The console shows `[Splint] INFO Splint 0.1.0 agent loaded`, then `Splint 0.1.0 active: 15 methods patched` once the world is running. Run `splint status` in the console to check.
+3. Start the server. The console shows `[Splint] INFO Splint 0.1.0 agent loaded` first, then `Splint 0.1.0 active: N methods patched` once the world is running. Run `splint status` in the console: it should say `15 methods patched, none missing`. A `MISSING` list means a game update changed those methods; Splint then leaves them unpatched rather than failing.
 
 To uninstall, remove the `-javaagent` argument. Saves stay compatible both ways: Splint only changes which ID numbers new animals get. It keeps one small file, `splint/animal-ids.txt`, in the save folder.
 
