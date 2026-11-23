@@ -1042,6 +1042,101 @@ def server_zombie_update(s: Session) -> dict:
     return out
 
 
+PASTURE = (7333, 8322, 7363, 8347)   # Fallas Lake shore: land up to x=7350, open water from x=7351
+
+
+def pasture_pond(s: Session) -> dict:
+    """Admins' question: can a pasture built over water cause this? A fenced animal zone is made
+    the way ISAddDesignationAnimalZoneUI does (DesignationZoneAnimal.new + createSurroundingFence)
+    with about a third of it open lake. Farm juveniles with growth ages spread over the next week
+    (from the game's stage table) and hens are placed on dry land inside. A server ticker samples
+    how many animals stand on water squares while in-game days pass, then the player leaves for
+    three days and comes back so the area catches up. Recorded: animals ever on water, ghosts,
+    growth, exceptions, whether the world update keeps running."""
+    x0, y0, x1, y1 = PASTURE
+    s.tp(*LAKE_SHORE)
+    made = s.lua(
+        f"local z=DesignationZoneAnimal.new('splint pond test',{x0},{y0},0,{x1 + 1},{y1 + 1},true) z:createSurroundingFence() "
+        f"local water,land=0,0 for x={x0},{x1} do for y={y0},{y1} do local sq=getCell():getGridSquare(x,y,0) "
+        "if sq then if sq:isWaterSquare() then water=water+1 else land=land+1 end end end end "
+        "return 'water='..water..' land='..land")
+    placed = s.lua(
+        "local spots={} "
+        f"for x={x0}+1,{x1}-1 do for y={y0}+1,{y1}-1 do local sq=getCell():getGridSquare(x,y,0) "
+        "if sq and not sq:isWaterSquare() then spots[#spots+1]={x,y} end end end "
+        "local counts={} local function put(t,n,spread) local def=AnimalDefinitions.getDef(t) for i=1,n do "
+        "local p=spots[ZombRand(#spots)+1] local a=addAnimal(getCell(),p[1],p[2],0,t,def:getRandomBreed()) "
+        "if a and a:getData() then a:addToWorld() if spread then "
+        "local st=AnimalDefinitions.stages[a:getAdef():getGroup()] st=st and st.stages[a:getAnimalType()] local g=st and st.ageToGrow "
+        "if g then local d=g-1-ZombRand(7) a:getData():setAge(d) a:setHoursSurvived(d*24+ZombRand(24)) end end "
+        "counts[t]=(counts[t] or 0)+1 end end end "
+        "put('chick',120,true) put('lamb',20,true) put('piglet',20,true) put('hen',30,false) "
+        "local out={} for k,v in pairs(counts) do out[#out+1]=k..'='..v end return table.concat(out,' ')")
+    # Server-side sampler: animals standing on water inside the pasture, every 10 ticks.
+    s.lua(f"SplintLabServer.pond={{max=0,samples=0,wet=0,ids={{}}}} local P=SplintLabServer.pond local tick=0 "
+          "SplintLabServer.pondTick=function() tick=tick+1 if tick%10~=0 then return end local w=0 "
+          "local l=getCell():getObjectListForLua() for i=0,l:size()-1 do local o=l:get(i) if instanceof(o,'IsoAnimal') then "
+          f"local x,y=o:getX(),o:getY() if x>={x0} and x<={x1 + 1} and y>={y0} and y<={y1 + 1} then local sq=o:getCurrentSquare() "
+          "if sq and sq:isWaterSquare() then w=w+1 P.ids[o:getAnimalID()]=true end end end end "
+          "P.samples=P.samples+1 P.wet=P.wet+w if w>P.max then P.max=w end end "
+          "Events.OnTick.Add(SplintLabServer.pondTick) return 1")
+    state = ("local n,types,g=0,{},0 local l=getCell():getObjectListForLua() for i=0,l:size()-1 do local o=l:get(i) "
+             f"if instanceof(o,'IsoAnimal') then local x,y=o:getX(),o:getY() if x>={x0 - 4} and x<={x1 + 5} and y>={y0 - 4} and y<={y1 + 5} then "
+             "n=n+1 local t=tostring(o:getAnimalType()) types[t]=(types[t] or 0)+1 "
+             "if o:getData()==nil or o:getAnimalType()==nil then g=g+1 end end end end "
+             "local P=SplintLabServer.pond local ever=0 for _ in pairs(P.ids) do ever=ever+1 end local out={} "
+             "for k,v in pairs(types) do out[#out+1]=k..'='..v end table.sort(out) "
+             "return 'animals='..n..' ghosts='..g..' on_water_max='..P.max..' animals_ever_on_water='..ever"
+             "..' samples='..P.samples..' types='..table.concat(out,',')")
+    off = s.log_size()
+    out: dict = {"pasture": made, "placed": placed, "start": s.lua(state).split(" ", 2)[-1], "checkpoints": []}
+    for _ in range(5):
+        clock = wait_game_hours(s, 24)
+        cp: dict = {"clock": clock, "lua_alive": heartbeat_alive(s, wait=6)}
+        if cp["lua_alive"]:
+            cp["state"] = s.lua(state).split(" ", 2)[-1]
+        out["checkpoints"].append(cp)
+        if not cp["lua_alive"]:
+            break
+    else:
+        # Every animal by ID before leaving, to tell animals that come back late from animals that are gone.
+        ids = ("local out={} local l=getCell():getObjectListForLua() for i=0,l:size()-1 do local o=l:get(i) "
+               f"if instanceof(o,'IsoAnimal') and o:getData() then local x,y=o:getX(),o:getY() if x>={x0 - 4} and x<={x1 + 5} and y>={y0 - 4} and y<={y1 + 5} then "
+               "out[#out+1]=o:getAnimalID()..':'..tostring(o:getAnimalType()) end end end return table.concat(out,' ')")
+        before = dict(item.split(":", 1) for item in s.lua(ids).split()[2:])
+        s.tp(LAKE_SHORE[0] + 2000, LAKE_SHORE[1], settle=30)
+        out["away"] = wait_game_hours(s, 72)
+        s.tp(*LAKE_SHORE, settle=40)
+        back: dict = {"lua_alive": heartbeat_alive(s), "ids_before_leaving": len(before)}
+        if back["lua_alive"]:
+            waited = 0
+            for mark in (20, 80, 200):
+                time.sleep(mark - waited)
+                waited = mark
+                now = dict(item.split(":", 1) for item in s.lua(ids).split()[2:])
+                missing = [k for k in before if k not in now]
+                kinds: dict = {}
+                for k in missing:
+                    kinds[before[k]] = kinds.get(before[k], 0) + 1
+                corpses = s.lua(f"local t={{}} for x={x0 - 4},{x1 + 5} do for y={y0 - 4},{y1 + 5} do local sq=getCell():getGridSquare(x,y,0) "
+                                "if sq then local b=sq:getDeadBodys() for i=0,b:size()-1 do local d=b:get(i) if d:isAnimal() then "
+                                "local k=tostring(d:getAnimalType()) t[k]=(t[k] or 0)+1 end end end end end "
+                                "local out={} for k,v in pairs(t) do out[#out+1]=k..'='..v end return '['..table.concat(out,',')..']'")
+                back[f"after_{mark}s"] = {"state": s.lua(state).split(" ", 2)[-1], "missing_ids": len(missing),
+                                          "missing_by_type_when_left": kinds, "animal_corpses": corpses.split()[-1]}
+            if missing:
+                found = s.lua(WHERE_ID + "local n=0 for _,id in ipairs({" + ",".join(missing[:60]) + "}) do "
+                              "if not where(id):find('^0 ') then n=n+1 end end return n").split()[-1]
+                back["missing_found_anywhere_in_update_list"] = f"{found} of {min(len(missing), 60)} checked"
+        out["after_leaving_and_returning"] = back
+    out["stats_frozen_note"] = "player is invincible in the chamber, so stats are not a health signal here"
+    out["exceptions"] = exceptions(s.log_since(off))
+    if json.loads((s.evidence / "session.json").read_text()).get("agent"):
+        status = console_reply(s, "splint status", wait=8)
+        out["splint_status"] = " ".join(re.findall(r"(?:waterRelocations|ghostsRemoved|ghostsPrevented|failuresContained)=\d+", status))
+    return out
+
+
 def aging_rates(s: Session) -> dict:
     """How fast animals age in each place they can be (on the map, carried, in a livestock
     trailer, in a hutch), measured as days of age gained per in-game day, at a slow clock and in
@@ -1152,6 +1247,7 @@ EXTRA["time-chamber"] = time_chamber
 EXTRA["aging-rates"] = aging_rates
 EXTRA["stored-on-water-growth"] = stored_on_water_growth
 EXTRA["server-zombie-update"] = server_zombie_update
+EXTRA["pasture-pond"] = pasture_pond
 
 
 def start(evidence: Path, agent: str | None, resume: Path | None = None) -> Session:
