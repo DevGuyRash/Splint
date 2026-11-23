@@ -19,25 +19,7 @@ The full investigation, with the reproduced failures, is in [docs/investigation.
 
 ## Install on a server
 
-Splint is a Java agent. It rewrites a short list of game methods in memory when the server starts and changes no game files. Workshop mods cannot install Java code, so it is installed once on the server machine.
-
-1. Download `splint.jar` from the [latest release](https://github.com/DevGuyRash/Splint/releases/latest) (check it against `SHA256SUMS`, or build it yourself, see [Build](#build)) and copy it into the server's `java/` folder (next to `projectzomboid.jar`).
-2. Add `-javaagent:java/splint.jar` to the `vmArgs` list in `ProjectZomboid64.json` (tested on the Linux dedicated server; the Windows server reads the same file, but has not been tested).
-
-   ```json
-   "vmArgs": [
-       "-javaagent:java/splint.jar",
-       "-Djava.awt.headless=true",
-       ...
-   ]
-   ```
-
-   If you start the server with your own `java` command line, add the same argument before the main class.
-3. Start the server. The console shows `[Splint] INFO Splint 0.2.0 agent loaded` first, then `Splint 0.2.0 active: N of N patches applied` once the world is running. Run `splint status` in the console: it should say `N of N patches applied, none missing`. A `MISSING` list means a game update changed those methods; Splint then leaves them unpatched rather than failing.
-
-To uninstall, remove the `-javaagent` argument. Saves stay compatible both ways: Splint only changes which ID numbers new animals get. It keeps one small file, `splint/animal-ids.txt`, in the save folder.
-
-On a hosting panel that cannot edit `ProjectZomboid64.json` or the JVM arguments, Splint cannot be installed; ask the host to add the JVM argument.
+Download `splint.jar` from the [latest release](https://github.com/DevGuyRash/Splint/releases/latest), copy it into the server's `java/` folder and add `-javaagent:java/splint.jar` to `vmArgs` in `ProjectZomboid64.json`. [INSTALL.md](INSTALL.md) has the full steps: checking the download, other start scripts, how to confirm it works, upgrading and uninstalling. The same file is attached to every release.
 
 ## Commands
 
@@ -86,10 +68,7 @@ splint animals kill near 10850 9420 30 ghosts confirm
 
 ## Configuration
 
-All modules are on by default. JVM options (add them next to `-javaagent` in `vmArgs`):
-
-- `-Dsplint.disable=animals` turns a module off; `-Dsplint.modules=animals` turns on only the listed ones. The core is always on.
-- `-Dsplint.side=server|client` overrides side detection (normally not needed).
+All modules are on by default. The JVM options that turn modules on or off are in [INSTALL.md](INSTALL.md#options).
 
 `splint modules` lists what is loaded, and `splint status` shows patch health (`N of N patches applied, none missing`), the ID counter and every module's counters.
 
