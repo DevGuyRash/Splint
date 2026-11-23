@@ -1,10 +1,13 @@
 # Splint
 
-Splint is a server-side fix and admin-tools patch for Project Zomboid Build 42 dedicated servers. Version 0.1 targets the animal failure that leaves a multiplayer world "in limbo": players cannot act, timed actions stop, hunger and thirst stop changing, chunks stop streaming, and animals and vehicles vanish from view while the console fills with `textureSkinned` / `getAttachedTree` / `turnDelta` null-pointer errors about ten times a second. It is meant to grow into a general fixes and quality-of-life patch.
+Splint is a server-side fix, optimisation and admin-tools framework for Project Zomboid Build 42, built as a small core with feature modules on top (in the spirit of LuaBuddy and ZombieBuddy). The core provides patching, logging, an incident history, admin commands and module switches. Each module adds fixes for one area.
+
+The first module, `animals`, targets the animal failure that leaves a multiplayer world "in limbo": players cannot act, timed actions stop, hunger and thirst stop changing, chunks stop streaming, and animals and vehicles vanish from view while the console fills with `textureSkinned` / `getAttachedTree` / `turnDelta` null-pointer errors about ten times a second.
 
 What it does today:
 
-- **Unique animal IDs, generated correctly.** Vanilla's only source of new animal IDs is `this.animalId = Rand.Next(10000)` in `IsoAnimal.init`: a random number from 0 to 9999 with no uniqueness check. A 460-animal test farm held 8 to 13 duplicate pairs. Splint replaces that call site with a per-world allocator: IDs start at 10000, only increase, and are persisted in the save in reserved blocks, so restarts and crashes never reuse one. IDs loaded from a save move the counter past them.
+- **Unique animal IDs, generated correctly.** Vanilla's only source of new animal IDs is `this.animalId = Rand.Next(10000)` in `IsoAnimal.init`: a random number from 0 to 9999 with no uniqueness check. A 460-animal test farm held 8 to 13 duplicate pairs. Splint replaces that expression with a per-world allocator: IDs start at 10000, only increase, and are persisted in the save in reserved blocks, so restarts and crashes never reuse one.
+- **O(1) duplicate checks.** Vanilla's duplicate check scans the 8×8 squares around every newly built animal, allocating a list per square, and cannot see a duplicate 5 squares away. Splint keeps an ID index, a primitive `int`-keyed open-addressing hash table with weak values, so every check is one lookup across the whole server. Duplicates are refused when set, repaired when an old save loads one, and fixed before a chunk unloads (vanilla's population worker silently drops an animal whose ID repeats there).
 - **No half-built animals.** Vanilla can leave an animal with no type, data or ID in the world: when it is created on a water square, or with an unknown type, or by its own duplicate check. One such animal throws on every frame and stops the whole world update. Splint moves animals created on water to the nearest land, removes ghosts it finds, and makes animal removal always complete.
 - **Failure isolation.** An exception in one animal's update, sound update or hutch update is caught, logged with its location, and contained. The rest of the world keeps running. An animal that keeps failing is frozen in place and retried with back-off; admins can inspect, release or remove it.
 - **No silent animal loss.** When an animal grows next to another animal with the same ID, vanilla deletes both the animal and its next stage. Splint keeps both and gives the newcomer a fresh ID.
@@ -30,7 +33,7 @@ Splint is a Java agent. It rewrites a short list of game methods in memory when 
    ```
 
    If you start the server with your own `java` command line, add the same argument before the main class.
-3. Start the server. The console shows `[Splint] INFO Splint 0.1.0 agent loaded` first, then `Splint 0.1.0 active: N methods patched` once the world is running. Run `splint status` in the console: it should say `15 methods patched, none missing`. A `MISSING` list means a game update changed those methods; Splint then leaves them unpatched rather than failing.
+3. Start the server. The console shows `[Splint] INFO Splint 0.2.0 agent loaded` first, then `Splint 0.2.0 active: N of N patches applied` once the world is running. Run `splint status` in the console: it should say `N of N patches applied, none missing`. A `MISSING` list means a game update changed those methods; Splint then leaves them unpatched rather than failing.
 
 To uninstall, remove the `-javaagent` argument. Saves stay compatible both ways: Splint only changes which ID numbers new animals get. It keeps one small file, `splint/animal-ids.txt`, in the save folder.
 
@@ -78,6 +81,19 @@ splint animals kill cell 42 36 in hutch confirm
 splint animals list player Bob 40 type cow sex female
 splint animals kill near 10850 9420 30 ghosts confirm
 ```
+
+## Configuration
+
+All modules are on by default. JVM options (add them next to `-javaagent` in `vmArgs`):
+
+- `-Dsplint.disable=animals` turns a module off; `-Dsplint.modules=animals` turns on only the listed ones. The core is always on.
+- `-Dsplint.side=server|client` overrides side detection (normally not needed).
+
+`splint modules` lists what is loaded, and `splint status` shows patch health (`N of N patches applied, none missing`), the ID counter and every module's counters.
+
+## Performance
+
+Speed is a design rule, not an afterthought. On the normal path, the per-animal, per-tick hooks do three field reads and two volatile reads, with no allocation, no lock and no hash lookup. ID checks are O(1) hash lookups with primitive keys. Expensive work (finding players, building log lines, recording incidents) only happens when something went wrong or an admin runs a command. The lab's stress scenarios measure server ticks per second with 2,000 and 5,000 animals, with and without Splint.
 
 ## Build
 

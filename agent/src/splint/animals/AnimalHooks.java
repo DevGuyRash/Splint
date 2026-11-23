@@ -143,7 +143,12 @@ public final class AnimalHooks {
         if (self.getAdef() == null) return false;                   // constructor: ID not assigned yet
         int id = self.getAnimalID();
         IsoAnimal other = AnimalIndex.get(id);
-        if (other == null || other == self || other == replacing || !AnimalIndex.isLive(other)) return false;
+        if (other == null || other == self || other == replacing || !AnimalIndex.isLive(other)) {
+            // Growth (replacing != null) is rare, once per animal per stage, and it is where vanilla
+            // used to delete over IDs; so also look at the neighbourhood the index may not know.
+            if (replacing != null) checkNeighbours(self, replacing, id);
+            return false;
+        }
         if (sameIndividual(other, self)) {
             AnimalOps.incident("duplicate copy removed", other);
             Log.problem("duplicate-copy", "removed a second object of the same animal (shared data/genome): "
@@ -155,6 +160,38 @@ public final class AnimalHooks {
             claim(replacing != null ? replacing : self, id, replacing != null ? "growing" : "checked");
         }
         return false;
+    }
+
+    /**
+     * Allocation-free look over vanilla's 8x8 window for a live animal that carries {@code id}
+     * without the index knowing it. Unreachable while every ID write goes through Splint, but a
+     * duplicate left in place gets an animal silently dropped later, so it is never left.
+     */
+    private static void checkNeighbours(IsoAnimal self, IsoAnimal replacing, int id) {
+        IsoGridSquare origin = self.getSquare();
+        if (origin == null || origin.getCell() == null) return;
+        IsoCell cell = origin.getCell();
+        int ox = origin.getX(), oy = origin.getY(), oz = origin.getZ();
+        for (int x = ox - 4; x < ox + 4; x++) {
+            for (int y = oy - 4; y < oy + 4; y++) {
+                IsoGridSquare sq = cell.getGridSquare(x, y, oz);
+                if (sq == null) continue;
+                List<IsoMovingObject> mov = sq.getMovingObjects();
+                for (int i = 0; i < mov.size(); i++) {
+                    if (mov.get(i) instanceof IsoAnimal o && o != self && o != replacing && o.getAnimalID() == id
+                            && !AnimalOps.isGhost(o) && !sameIndividual(o, self)) {
+                        AnimalIndex.put(id, o);                     // teach the index the other holder
+                        int fresh = AnimalIds.allocate();
+                        replacing.setAnimalID(fresh);
+                        AnimalStats.DUPLICATE_IDS_FIXED.incrementAndGet();
+                        AnimalOps.incident("unindexed duplicate id " + id + " at growth; next stage got " + fresh, replacing);
+                        Log.problem("duplicate-id-unindexed", "growing animal shares id " + id + " with "
+                                + AnimalOps.describe(o) + " (not in the ID index); next stage got id " + fresh, null);
+                        return;
+                    }
+                }
+            }
+        }
     }
 
     /** Two objects carrying the very same data or genome are copies of one animal. */
