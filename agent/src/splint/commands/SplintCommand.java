@@ -41,7 +41,7 @@ import zombie.vehicles.BaseVehicle;
 @RequiredCapability(requiredCapability = Capability.AnimalCheats)
 public class SplintCommand extends CommandBase {
     private static final int LIST_LIMIT = 25;
-    private static final int PLAYER_SCAN_RADIUS = 120;
+    private static final int PLAYER_SCAN_RADIUS = 60;
 
     public SplintCommand(String username, Role userRole, String command, UdpConnection connection) {
         super(username, userRole, command, connection);
@@ -64,19 +64,32 @@ public class SplintCommand extends CommandBase {
     @Override
     protected String Command() {
         String[] a = args();
+        String result;
         try {
-            if (a.length == 0 || a[0].equalsIgnoreCase("help")) return HELP;
-            String result = switch (a[0].toLowerCase(Locale.ROOT)) {
+            if (a.length == 0 || a[0].equalsIgnoreCase("help")) result = HELP;
+            else result = switch (a[0].toLowerCase(Locale.ROOT)) {
                 case "status" -> status();
                 case "animals", "animal", "a" -> animals(a);
                 default -> "Unknown /splint command '" + a[0] + "'.\n" + HELP;
             };
-            return result;
         } catch (Usage u) {
-            return u.getMessage();
+            result = u.getMessage();
         } catch (Throwable t) {
             Log.error("/splint " + String.join(" ", a) + " failed", t);
-            return "Splint command failed: " + t + " (details in the Splint log)";
+            result = "Splint command failed: " + t + " (details in the Splint log)";
+        }
+        // In-game chat breaks lines on " <LINE> " (as vanilla /help does); the console on \n.
+        return connection == null ? result : result.replace("\n", " <LINE> ");
+    }
+
+    /**
+     * Changes to the world must happen on the server's main thread. The console, RCON and
+     * in-game chat run commands there; the Discord bridge calls in from its own thread.
+     */
+    private static void requireMainThread() {
+        Thread main = zombie.network.GameServer.mainThread;
+        if (main != null && Thread.currentThread() != main) {
+            throw new Usage("This command changes the world; run it from the server console, RCON or in-game chat.");
         }
     }
 
@@ -348,6 +361,7 @@ public class SplintCommand extends CommandBase {
         if (found.isEmpty()) return "Nothing matches " + s.label() + ".";
         Map<String, Integer> types = new TreeMap<>();
         for (Found f : found) types.merge(AnimalOps.isGhost(f.animal()) ? "GHOST" : f.animal().getAnimalType(), 1, Integer::sum);
+        if (confirm) requireMainThread();
         if (!confirm) {
             return "Dry run: would remove " + found.size() + " animals (" + s.label() + ") " + types
                     + ". Repeat the command with 'confirm' at the end to remove them.";
@@ -376,8 +390,14 @@ public class SplintCommand extends CommandBase {
             if (!AnimalOps.isGhost(f.animal())) byId.computeIfAbsent(f.animal().getAnimalID(), k -> new ArrayList<>()).add(f);
         }
         List<Found> toFix = new ArrayList<>();
-        for (List<Found> group : byId.values()) if (group.size() > 1) toFix.addAll(group.subList(1, group.size()));
+        for (List<Found> group : byId.values()) {
+            if (group.size() < 2) continue;
+            // Babies find their mother by ID: the animal with babies keeps the ID.
+            group.sort(Comparator.comparingInt((Found f) -> -babies(f.animal()).size()));
+            toFix.addAll(group.subList(1, group.size()));
+        }
         if (toFix.isEmpty()) return "No duplicate animal IDs among loaded animals.";
+        if (confirm) requireMainThread();
         if (!confirm) return "Dry run: " + toFix.size() + " animals share an ID with another loaded animal. "
                 + "Add 'confirm' to give each a fresh unique ID (the first of each group keeps its ID).";
         StringBuilder audit = new StringBuilder();
@@ -385,6 +405,10 @@ public class SplintCommand extends CommandBase {
             int old = f.animal().getAnimalID();
             int fresh = AnimalIds.allocate();
             f.animal().setAnimalID(fresh);
+            for (IsoAnimal baby : babies(f.animal())) {
+                if (baby.motherId == old) baby.motherId = fresh;
+                if (baby.attachBackToMother == old) baby.attachBackToMother = fresh;
+            }
             Stats.duplicateIdsFixed.incrementAndGet();
             audit.append("\n  ").append(old).append(" -> ").append(fresh).append(' ').append(where(f));
         }
@@ -392,10 +416,16 @@ public class SplintCommand extends CommandBase {
         return "Gave " + toFix.size() + " animals fresh unique IDs (details in Splint log).";
     }
 
+    private static List<IsoAnimal> babies(IsoAnimal a) {
+        List<IsoAnimal> b = a.getBabies();
+        return b == null ? List.of() : new ArrayList<>(b);
+    }
+
     private String frozen(List<String> r, boolean confirm) {
         List<IsoAnimal> frozen = Quarantine.frozen();
         if (frozen.isEmpty()) return "No frozen animals.";
         String action = r.isEmpty() ? "list" : r.get(0).toLowerCase(Locale.ROOT);
+        if (confirm) requireMainThread();
         Map<IsoAnimal, Found> places = new java.util.IdentityHashMap<>();
         for (Found f : AnimalOps.all(null)) places.put(f.animal(), f);
         switch (action) {

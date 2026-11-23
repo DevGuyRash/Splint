@@ -127,16 +127,18 @@ public final class AnimalOps {
         IsoCell cell = IsoWorld.instance == null ? null : IsoWorld.instance.getCell();
         if (cell != null) {
             for (IsoMovingObject o : new ArrayList<>(cell.getObjectList())) {
-                if (o instanceof IsoAnimal a && a.getHutch() == null && a.getVehicle() == null) add(seen, a, Place.WORLD, null);
+                if (o instanceof IsoAnimal a && a.getHutch() == null && a.getVehicle() == null && !a.isOnHook()) {
+                    add(seen, a, Place.WORLD, null);
+                }
             }
             if (area != null) {
                 for (int x = area.x0; x <= area.x1; x++) {
                     for (int y = area.y0; y <= area.y1; y++) {
-                        for (int z = area.z0; z <= area.z1; z++) {
+                        for (int z = Math.max(area.z0, SCAN_Z_MIN); z <= Math.min(area.z1, SCAN_Z_MAX); z++) {
                             IsoGridSquare sq = cell.getGridSquare(x, y, z);
                             if (sq == null) continue;
                             for (IsoMovingObject o : sq.getMovingObjects()) {
-                                if (o instanceof IsoAnimal a) add(seen, a, Place.WORLD, null);
+                                if (o instanceof IsoAnimal a && !a.isOnHook()) add(seen, a, Place.WORLD, null);
                             }
                         }
                     }
@@ -195,12 +197,21 @@ public final class AnimalOps {
         }
     }
 
+    /** Every floor Build 42 can have. */
+    static final int Z_MIN = -32, Z_MAX = 31;
+    /**
+     * Floors whose squares are scanned for square-only ghosts. Live animals on every floor are
+     * found through the cell update list; scanning all 64 floors square by square would cost
+     * too much for a command.
+     */
+    static final int SCAN_Z_MIN = -2, SCAN_Z_MAX = 3;
+
     /** A box of squares; z range inclusive. */
     public record Area(int x0, int y0, int x1, int y1, int z0, int z1) {
         public static Area cell(int cx, int cy) {
-            return new Area(cx * CELL, cy * CELL, cx * CELL + CELL - 1, cy * CELL + CELL - 1, -1, 2);
+            return new Area(cx * CELL, cy * CELL, cx * CELL + CELL - 1, cy * CELL + CELL - 1, Z_MIN, Z_MAX);
         }
-        public static Area radius(int x, int y, int r) { return new Area(x - r, y - r, x + r, y + r, -1, 2); }
+        public static Area radius(int x, int y, int r) { return new Area(x - r, y - r, x + r, y + r, Z_MIN, Z_MAX); }
         public boolean contains(int x, int y, int z) {
             return x >= x0 && x <= x1 && y >= y0 && y <= y1 && z >= z0 && z <= z1;
         }
@@ -248,9 +259,24 @@ public final class AnimalOps {
         quietly(a::removeFromUpdateLists);
     }
 
-    /** Removes a ghost found on the map and records it. */
+    /**
+     * Removes a ghost and records it. Ghosts can also sit in a trailer's animal list or in an
+     * inventory item, which update them directly; take them out of those holders too, or the
+     * holder would keep updating (and saving) them.
+     */
     public static void removeGhost(IsoAnimal a, String where) {
         String what = describe(a);
+        quietly(() -> {
+            BaseVehicle v = a.getVehicle();
+            if (v != null) v.animals.remove(a);
+        });
+        quietly(() -> {
+            ItemContainer c = a.getContainer();
+            if (c == null) return;
+            for (InventoryItem item : c.getAllType("Animal")) {
+                if (item instanceof AnimalInventoryItem ai && ai.getAnimal() == a) removeCarried(ai);
+            }
+        });
         detach(a);
         Stats.ghostsRemoved.incrementAndGet();
         Log.problem("ghost-removed:" + where, "removed uninitialised animal (" + where + "): " + what, null);
@@ -273,12 +299,7 @@ public final class AnimalOps {
                     quietly(a::removeFromUpdateLists);
                 }
                 case INVENTORY -> {
-                    AnimalInventoryItem item = (AnimalInventoryItem) f.holder();
-                    ItemContainer c = item.getContainer();
-                    if (c != null) {
-                        c.Remove(item);
-                        if (GameServer.server) GameServer.sendRemoveItemFromContainer(c, item);
-                    }
+                    removeCarried((AnimalInventoryItem) f.holder());
                     quietly(a::removeFromUpdateLists);
                 }
                 case WORLD -> {
@@ -297,6 +318,19 @@ public final class AnimalOps {
         } catch (Throwable t) {
             Log.error("kill failed for " + describe(a), t);
             return t.toString();
+        }
+    }
+
+    /** Takes a carried animal item out of its container and out of its carrier's hands. */
+    static void removeCarried(AnimalInventoryItem item) {
+        ItemContainer c = item.getContainer();
+        for (IsoPlayer p : players()) {
+            if (p.getPrimaryHandItem() == item) p.setPrimaryHandItem(null);
+            if (p.getSecondaryHandItem() == item) p.setSecondaryHandItem(null);
+        }
+        if (c != null) {
+            c.Remove(item);
+            if (GameServer.server) GameServer.sendRemoveItemFromContainer(c, item);
         }
     }
 

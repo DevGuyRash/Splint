@@ -15,16 +15,18 @@ import zombie.commands.CommandBase;
  */
 public final class CommandHooks {
     private static final Pattern SPLINT = Pattern.compile("^splint\\b", Pattern.CASE_INSENSITIVE);
-    private static final MethodHandle ORIGINAL_FIND;
-    private static final MethodHandle ORIGINAL_SUBCLASSES;
+    // Separate holders: each resolves only when its own (applied) patch first runs.
+    private static final class Find {
+        static final MethodHandle H = original("findCommandCls", MethodType.methodType(Class.class, String.class));
+    }
 
-    static {
+    private static final class SubClasses {
+        static final MethodHandle H = original("getSubClasses", MethodType.methodType(Class[].class));
+    }
+
+    private static MethodHandle original(String name, MethodType type) {
         try {
-            var lookup = MethodHandles.publicLookup();
-            ORIGINAL_FIND = lookup.findStatic(CommandBase.class, Patcher.ORIGINAL_PREFIX + "findCommandCls",
-                    MethodType.methodType(Class.class, String.class));
-            ORIGINAL_SUBCLASSES = lookup.findStatic(CommandBase.class, Patcher.ORIGINAL_PREFIX + "getSubClasses",
-                    MethodType.methodType(Class[].class));
+            return MethodHandles.publicLookup().findStatic(CommandBase.class, Patcher.ORIGINAL_PREFIX + name, type);
         } catch (ReflectiveOperationException e) {
             throw new IllegalStateException(e);
         }
@@ -35,11 +37,11 @@ public final class CommandHooks {
     public static Class<?> findCommandCls(String command) throws Throwable {
         Log.gameStarted();
         if (command != null && SPLINT.matcher(command.stripLeading()).find()) return SplintCommand.class;
-        return (Class<?>) ORIGINAL_FIND.invokeExact(command);
+        return (Class<?>) Find.H.invokeExact(command);
     }
 
     public static Class<?>[] getSubClasses() throws Throwable {
-        Class<?>[] vanilla = (Class<?>[]) ORIGINAL_SUBCLASSES.invokeExact();
+        Class<?>[] vanilla = (Class<?>[]) SubClasses.H.invokeExact();
         Class<?>[] out = Arrays.copyOf(vanilla, vanilla.length + 1);
         out[vanilla.length] = SplintCommand.class;
         return out;

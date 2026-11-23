@@ -6,6 +6,7 @@ import java.util.concurrent.atomic.AtomicLong;
 public final class Stats {
     public static final AtomicLong idsAssigned = new AtomicLong();
     public static final AtomicLong duplicateIdsFixed = new AtomicLong();
+    public static final AtomicLong duplicateCopiesRemoved = new AtomicLong();
     public static final AtomicLong ghostsRemoved = new AtomicLong();
     public static final AtomicLong ghostsPrevented = new AtomicLong();
     public static final AtomicLong waterRelocations = new AtomicLong();
@@ -18,7 +19,7 @@ public final class Stats {
 
     public static String summary() {
         return "idsAssigned=" + idsAssigned + " duplicateIdsFixed=" + duplicateIdsFixed
-                + " ghostsPrevented=" + ghostsPrevented + " ghostsRemoved=" + ghostsRemoved
+                + " duplicateCopiesRemoved=" + duplicateCopiesRemoved + " ghostsPrevented=" + ghostsPrevented + " ghostsRemoved=" + ghostsRemoved
                 + " waterRelocations=" + waterRelocations + " updateFailuresContained=" + updateFailures
                 + " removalFailuresContained=" + removalFailures + " hutchFailuresContained=" + hutchFailures
                 + " killedByCommand=" + killedByCommand;

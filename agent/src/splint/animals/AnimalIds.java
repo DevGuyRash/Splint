@@ -1,6 +1,9 @@
 package splint.animals;
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
+import java.nio.file.StandardOpenOption;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -27,6 +30,8 @@ public final class AnimalIds {
     /** Vanilla IDs are 0..9999; Splint never issues those. */
     public static final int FIRST = 10_000;
     private static final int BLOCK = 1_000;
+    /** IDs above this are not followed by the counter (leaves room for 1e9 more IDs). */
+    private static final int OBSERVE_LIMIT = 2_000_000_000;
 
     private static boolean loaded;
     private static int next;
@@ -53,7 +58,12 @@ public final class AnimalIds {
     /** Records an ID that exists in the world, so the counter never issues it again. */
     public static synchronized void observe(int id) {
         ensureLoaded();
-        if (id >= next && id < Integer.MAX_VALUE) {
+        if (id > OBSERVE_LIMIT) {
+            // Only an edited save can hold this; following it would exhaust the counter.
+            Log.problem("id-out-of-range", "animal with id " + id + " is outside Splint's range; not moving the counter", null);
+            return;
+        }
+        if (id >= next) {
             next = id + 1;
             if (next >= reservedUntil) reserve();
         }
@@ -71,15 +81,14 @@ public final class AnimalIds {
         try {
             file = saveDirOverride != null ? saveDirOverride.resolve("splint/animal-ids.txt")
                     : Path.of(zombie.ZomboidFileSystem.instance.getFileNameInCurrentSave("splint", "animal-ids.txt"));
-            if (Files.exists(file)) {
-                for (String line : Files.readAllLines(file, StandardCharsets.UTF_8)) {
-                    if (line.startsWith("next=")) next = Math.max(FIRST, Integer.parseInt(line.substring(5).trim()));
-                }
+            Integer stored = Files.exists(file) ? readNext(file) : null;
+            if (stored != null) {
+                next = Math.max(FIRST, stored);
                 Log.info("animal ID counter loaded: next=" + next);
-            } else if (worldHasAnimals()) {
-                // An existing world without the counter file (Splint newly installed, or the
-                // file was lost). IDs >= 10000 can only exist if Splint issued them before, so
-                // start far away from anything it could have issued.
+            } else if (Files.exists(file) || worldHasAnimals()) {
+                // An existing world without a readable counter (Splint newly installed, or the
+                // file was lost or truncated). IDs >= 10000 can only exist if Splint issued
+                // them before, so start far away from anything it could have issued.
                 next = 1_000_000_000 + ThreadLocalRandom.current().nextInt(100_000_000);
                 Log.warn("no animal ID counter in this save; starting new IDs at " + next);
             }
@@ -88,6 +97,17 @@ public final class AnimalIds {
             Log.error("cannot read the animal ID counter; starting new IDs at " + next, t);
         }
         reservedUntil = next;
+    }
+
+    private static Integer readNext(Path f) {
+        try {
+            for (String line : Files.readAllLines(f, StandardCharsets.UTF_8)) {
+                if (line.startsWith("next=")) return Integer.parseInt(line.substring(5).trim());
+            }
+        } catch (IOException | NumberFormatException e) {
+            Log.error("animal ID counter file " + f + " is unreadable", e);
+        }
+        return null;
     }
 
     private static boolean worldHasAnimals() {
@@ -116,8 +136,13 @@ public final class AnimalIds {
         try {
             Files.createDirectories(file.getParent());
             Path tmp = file.resolveSibling(file.getFileName() + ".tmp");
-            Files.writeString(tmp, "# Splint animal ID counter. Every ID below this value may be in use.\nnext="
-                    + reservedUntil + "\n", StandardCharsets.UTF_8);
+            byte[] body = ("# Splint animal ID counter. Every ID below this value may be in use.\nnext="
+                    + reservedUntil + "\n").getBytes(StandardCharsets.UTF_8);
+            try (FileChannel ch = FileChannel.open(tmp, StandardOpenOption.CREATE, StandardOpenOption.WRITE,
+                    StandardOpenOption.TRUNCATE_EXISTING)) {
+                ch.write(ByteBuffer.wrap(body));
+                ch.force(true);
+            }
             Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
         } catch (IOException e) {
             Log.problem("id-counter-write", "cannot write " + file, e);

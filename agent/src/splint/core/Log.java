@@ -44,7 +44,8 @@ public final class Log {
      * including this one.
      */
     public static long problem(String key, String message, Throwable t) {
-        Counter c = COUNTERS.computeIfAbsent(key, k -> new Counter());
+        // Numbers in keys (indices, coordinates, IDs) would make every occurrence unique.
+        Counter c = COUNTERS.computeIfAbsent(key.replaceAll("-?\\d+", "#"), k -> new Counter());
         long now = System.currentTimeMillis();
         long total;
         boolean full;

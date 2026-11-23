@@ -19,6 +19,7 @@ public final class AnimalIdsTest {
         crashLosesOnlyUnusedReservation();
         loadedIdsMoveTheCounter();
         existingWorldWithoutCounterStartsFarAway();
+        truncatedCounterFileIsNotTrustedAsFresh();
         if (failures > 0) {
             System.out.println(failures + " AnimalIds check(s) FAILED");
             System.exit(1);
@@ -72,6 +73,15 @@ public final class AnimalIdsTest {
         AnimalIds.resetForTest(w);
         int id = AnimalIds.allocate();
         check("existing world without counter starts at >= 1e9 (" + id + ")", id >= 1_000_000_000);
+    }
+
+    static void truncatedCounterFileIsNotTrustedAsFresh() throws Exception {
+        Path w = world();
+        Files.createDirectories(w.resolve("splint"));
+        Files.writeString(w.resolve("splint/animal-ids.txt"), "");   // e.g. cut short by a power loss
+        AnimalIds.resetForTest(w);
+        int id = AnimalIds.allocate();
+        check("unreadable counter file starts at >= 1e9, not at 10000 (" + id + ")", id >= 1_000_000_000);
     }
 
     private static void check(String what, boolean ok) {

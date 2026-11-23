@@ -69,6 +69,13 @@ class Session:
         time.sleep(settle)
 
 
+def here(s: Session) -> tuple[int, int]:
+    """The player's square: sessions do not always spawn at exactly the same point."""
+    xy = s.lua("local p=SplintLabServer.player() return math.floor(p:getX())..' '..math.floor(p:getY())")
+    x, y = xy.split()[-2:]
+    return int(x), int(y)
+
+
 def exceptions(text: str) -> dict[str, int]:
     """Exception messages in a server log excerpt, grouped and counted."""
     counts: dict[str, int] = {}
@@ -79,6 +86,14 @@ def exceptions(text: str) -> dict[str, int]:
             msg = re.sub(r"\s+at \S+\(\S+\)\.$", "", msg)
             counts[msg] = counts.get(msg, 0) + 1
     return counts
+
+
+def fresh_spot(s: Session, dx: int) -> tuple[int, int]:
+    """Moves the player to an untouched spot near spawn, so counts are not mixed up with
+    animals an earlier scenario left behind in the same session."""
+    x, y = here_spawn(s)
+    s.tp(x + dx, y, settle=15)
+    return here(s)
 
 
 def heartbeat_alive(s: Session, wait: float = 12) -> bool:
@@ -127,7 +142,7 @@ def force_growth_code(x: int, y: int, r: int, days: int = 400) -> str:
 def mass_growth(s: Session) -> dict:
     """Hundreds of juveniles cross their growth age together, as a big farm does after a
     catch-up. Random 0-9999 IDs make duplicate pairs likely at this size."""
-    x, y = SPAWN
+    x, y = here(s)
     s.server("spawn chick - 300 4 0 10 110")
     s.server("spawn rabkitten - 100 -12 0 6 110")
     s.server("spawn piglet - 60 0 12 6 130")
@@ -173,8 +188,9 @@ def grow_near_ghost(s: Session) -> dict:
 
 def invalid_type(s: Session) -> dict:
     """An animal whose type has no definition (for example a removed animal mod)."""
+    x, y = here(s)
     off = s.log_size()
-    made = s.lua(f"local d=AnimalDefinitions.getDef('hen') local a=addAnimal(getCell(),{SPAWN[0]+3},{SPAWN[1]},0,'splintNoSuchAnimal',d:getRandomBreed()) "
+    made = s.lua(f"local d=AnimalDefinitions.getDef('hen') local a=addAnimal(getCell(),{x}+3,{y},0,'splintNoSuchAnimal',d:getRandomBreed()) "
                  "return 'id='..a:getAnimalID()..' data='..tostring(a:getData())")
     time.sleep(15)
     out = {"created": made, "lua_alive": heartbeat_alive(s), "stats_frozen": stats_frozen(s)}
@@ -184,7 +200,7 @@ def invalid_type(s: Session) -> dict:
 
 def duplicate_ids(s: Session) -> dict:
     """Two animals sharing an ID within 4 tiles, one of them growing (vanilla deletes both)."""
-    x, y = SPAWN
+    x, y = fresh_spot(s, 120)
     s.server("spawn chick - 1 3 0 0 0")
     s.server("spawn hen - 1 4 0 0 30")
     before = census(s, x, y, 8)
@@ -225,7 +241,7 @@ def console_reply(s: Session, line: str, wait: float = 6) -> str:
 def admin_commands(s: Session) -> dict:
     """Every /splint command against animals on the map, in a hutch, in a trailer and in an
     inventory. Expected counts come from what this scenario places, not from Splint."""
-    x, y = SPAWN
+    x, y = fresh_spot(s, 240)
     out: dict = {}
     s.server("spawn hen - 20 6 0 3 30")
     setup = s.lua(
@@ -287,7 +303,7 @@ INVENTORY_ANIMALS = ("local p=SplintLabServer.player() local items=p:getInventor
 def inventory_growth(s: Session) -> dict:
     """A chick carried in the player's inventory reaches its growth age (the report's
     'ghost chicken in my pocket' theory)."""
-    x, y = SPAWN
+    x, y = fresh_spot(s, -120)
     s.lua("local p=SplintLabServer.player() local cd=AnimalDefinitions.getDef('chick') "
           "local c=addAnimal(getCell(),math.floor(p:getX())+2,math.floor(p:getY()),0,'chick',cd:getRandomBreed()) "
           "local item=instanceItem('Base.Animal') item:setAnimal(c) c:removeFromWorld() c:removeFromSquare() "
@@ -302,7 +318,7 @@ def inventory_growth(s: Session) -> dict:
 
 def trailer_growth(s: Session) -> dict:
     """Chicks riding in a livestock trailer reach their growth age."""
-    x, y = SPAWN
+    x, y = fresh_spot(s, -240)
     made = s.lua(f"local tsq=getCell():getGridSquare({x}+8,{y}-8,0) local v=addVehicleDebug('Base.Trailer_Livestock',IsoDirections.N,nil,tsq) "
                  "SplintLabServer.trailer=v local cd=AnimalDefinitions.getDef('chick') "
                  f"for i=1,4 do local a=addAnimal(getCell(),{x}+8,{y}-8,0,'chick',cd:getRandomBreed()) v:addAnimalInTrailer(a) end "
@@ -321,7 +337,7 @@ def trailer_growth(s: Session) -> dict:
 
 def hutch_growth(s: Session) -> dict:
     """Chicks inside a hutch pass their growth age, then the hutch releases them."""
-    x, y = SPAWN
+    x, y = fresh_spot(s, 360)
     s.lua(f"local def=HutchDefinitions.hutchs['hutchhen'] local sq=getCell():getGridSquare({x}-6,{y}+6,0) "
           "local h=IsoHutch.new(sq,true,def.baseSprite,def,nil) h:transmitCompleteItemToClients() SplintLabServer.hutch=h "
           "local cd=AnimalDefinitions.getDef('chick') "
@@ -378,25 +394,51 @@ def main() -> None:
     r.add_argument("root")
     r.add_argument("--agent")
     r.add_argument("--only", nargs="*")
+    r.add_argument("--shared", action="store_true", help="run all chosen scenarios in one session")
     a = p.parse_args()
     root = Path(a.root).resolve()
     root.mkdir(parents=True, exist_ok=True)
-    results = {}
-    for name, fn in {**SCENARIOS, **EXTRA}.items():
-        if (a.only and name not in a.only) or (not a.only and name in EXTRA):
-            continue
-        evidence = root / name
+    chosen = [(n, f) for n, f in {**SCENARIOS, **EXTRA}.items()
+              if (a.only and n in a.only) or (not a.only and n not in EXTRA)]
+    results: dict = {}
+
+    def record(name: str, fn, s: Session) -> None:
         print(f"== {name}", flush=True)
-        s = start(evidence, a.agent)
         try:
             results[name] = fn(s)
         except SystemExit as e:
             results[name] = {"harness_error": str(e)}
-        finally:
-            subprocess.run([sys.executable, str(LAB / "splintlab.py"), "stop", str(evidence)])
-            s.proc.wait(timeout=60)
         print(json.dumps(results[name], indent=2), flush=True)
         (root / "results.json").write_text(json.dumps(results, indent=2) + "\n")
+
+    def stop(s: Session) -> None:
+        subprocess.run([sys.executable, str(LAB / "splintlab.py"), "stop", str(s.evidence)])
+        s.proc.wait(timeout=60)
+
+    if a.shared:
+        # One session for every scenario: only meaningful when none of them can wreck the world.
+        s = start(root / "shared", a.agent)
+        here_spawn(s)
+        try:
+            for name, fn in chosen:
+                record(name, fn, s)
+                s.tp(*here_spawn(s), settle=15)
+        finally:
+            stop(s)
+        return
+    for name, fn in chosen:
+        s = start(root / name, a.agent)
+        try:
+            record(name, fn, s)
+        finally:
+            stop(s)
+
+
+def here_spawn(s: Session) -> tuple[int, int]:
+    """Back to where the session's player first spawned, between shared scenarios."""
+    if not hasattr(s, "spawn_xy"):
+        s.spawn_xy = here(s)  # type: ignore[attr-defined]
+    return s.spawn_xy  # type: ignore[attr-defined]
 
 
 if __name__ == "__main__":

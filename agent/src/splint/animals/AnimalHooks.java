@@ -17,24 +17,27 @@ import zombie.iso.objects.IsoHutch;
 
 /**
  * Replacements for the vanilla animal methods listed in {@code SplintAgent.PATCHES}. Each one
- * still runs the original code (through {@code ORIGINAL_*}) unless it has a reason not to,
+ * still runs the original code (through the {@code H} handle of its holder class) unless it has a reason not to,
  * and each reason is a failure reproduced in the lab (see docs/investigation.md).
  */
 public final class AnimalHooks {
-    private static final MethodHandle ORIGINAL_INIT = original(IsoAnimal.class, "init", void.class, AnimalBreed.class);
-    private static final MethodHandle ORIGINAL_LOAD = original(IsoAnimal.class, "load", void.class, ByteBuffer.class, int.class, boolean.class);
-    private static final MethodHandle ORIGINAL_UPDATE = original(IsoAnimal.class, "update", void.class);
-    private static final MethodHandle ORIGINAL_SOUNDS = original(IsoAnimal.class, "updateLoopingSounds", void.class);
-    private static final MethodHandle ORIGINAL_REMOVE_FROM_WORLD = original(IsoAnimal.class, "removeFromWorld", void.class);
-    private static final MethodHandle ORIGINAL_DELETE = original(IsoAnimal.class, "delete", void.class);
-    private static final MethodHandle ORIGINAL_UNLOADED = original(IsoAnimal.class, "unloaded", void.class);
-    private static final MethodHandle ORIGINAL_HUTCH_UPDATE = original(IsoHutch.class, "update", void.class);
-    private static final MethodHandle ORIGINAL_CHUNK_UNLOAD = original("zombie.characters.animals.AnimalPopulationManager",
-            "removeChunkFromWorld", void.class, IsoChunk.class);
-    private static final MethodHandle ORIGINAL_VIRTUALIZE = original("zombie.characters.animals.AnimalPopulationManager",
-            "virtualizeAnimal", void.class, IsoAnimal.class);
-    private static final MethodHandle ORIGINAL_SAVE_REAL = original("zombie.characters.animals.AnimalManagerMain",
-            "saveRealAnimals", void.class);
+    // Each original is resolved in its own holder class, which the JVM initialises on the
+    // first call of that hook only. A hook runs only if its own patch applied, so a patch that
+    // failed to apply (e.g. after a game update) cannot break the others.
+    private static final class Init { static final MethodHandle H = original(IsoAnimal.class, "init", void.class, AnimalBreed.class); }
+    private static final class Load { static final MethodHandle H = original(IsoAnimal.class, "load", void.class, ByteBuffer.class, int.class, boolean.class); }
+    private static final class Update { static final MethodHandle H = original(IsoAnimal.class, "update", void.class); }
+    private static final class Sounds { static final MethodHandle H = original(IsoAnimal.class, "updateLoopingSounds", void.class); }
+    private static final class RemoveFromWorld { static final MethodHandle H = original(IsoAnimal.class, "removeFromWorld", void.class); }
+    private static final class Delete { static final MethodHandle H = original(IsoAnimal.class, "delete", void.class); }
+    private static final class Unloaded { static final MethodHandle H = original(IsoAnimal.class, "unloaded", void.class); }
+    private static final class HutchUpdate { static final MethodHandle H = original(IsoHutch.class, "update", void.class); }
+    private static final class ChunkUnload { static final MethodHandle H = original("zombie.characters.animals.AnimalPopulationManager",
+            "removeChunkFromWorld", void.class, IsoChunk.class); }
+    private static final class Virtualize { static final MethodHandle H = original("zombie.characters.animals.AnimalPopulationManager",
+            "virtualizeAnimal", void.class, IsoAnimal.class); }
+    private static final class SaveReal { static final MethodHandle H = original("zombie.characters.animals.AnimalManagerMain",
+            "saveRealAnimals", void.class); }
 
     /** Set while IsoAnimal.load runs: load calls init, then overwrites the ID with the saved one. */
     private static final ThreadLocal<Boolean> LOADING = ThreadLocal.withInitial(() -> false);
@@ -45,7 +48,7 @@ public final class AnimalHooks {
 
     /** init(breed) gives the animal a random 0-9999 ID; replace it with a unique one. */
     public static void init(IsoAnimal self, AnimalBreed breed) throws Throwable {
-        ORIGINAL_INIT.invokeExact(self, breed);
+        Init.H.invokeExact(self, breed);
         if (self.getAdef() == null) return;          // unknown type: no ID; handled as a ghost
         if (LOADING.get()) return;                   // load() sets the saved ID right after
         self.setAnimalID(AnimalIds.allocate());
@@ -56,7 +59,7 @@ public final class AnimalHooks {
         boolean outer = !LOADING.get();
         LOADING.set(true);
         try {
-            ORIGINAL_LOAD.invokeExact(self, input, worldVersion, isDebugSave);
+            Load.H.invokeExact(self, input, worldVersion, isDebugSave);
         } finally {
             if (outer) LOADING.set(false);
         }
@@ -96,6 +99,16 @@ public final class AnimalHooks {
                         continue;
                     }
                     if (constructing || other.getAnimalID() != self.getAnimalID()) continue;
+                    if (sameIndividual(other, self)) {
+                        // A second object for the same animal (vanilla's "chickenpocalypse"
+                        // case): remove the stray copy, keep the animal that is being updated.
+                        String copy = AnimalOps.describe(other);
+                        AnimalOps.detach(other);
+                        Stats.duplicateCopiesRemoved.incrementAndGet();
+                        Log.problem("duplicate-copy", "removed a second object of the same animal (shared data/genome): "
+                                + copy + " | kept: " + AnimalOps.describe(self), null);
+                        continue;
+                    }
                     IsoAnimal target = replacing != null ? replacing : self;
                     int old = target.getAnimalID();
                     int fresh = AnimalIds.allocate();
@@ -111,6 +124,12 @@ public final class AnimalHooks {
         return false;
     }
 
+    /** Two objects carrying the very same data or genome are copies of one animal. */
+    private static boolean sameIndividual(IsoAnimal a, IsoAnimal b) {
+        return (a.getData() != null && a.getData() == b.getData())
+                || (a.fullGenome != null && a.fullGenome == b.fullGenome);
+    }
+
     /**
      * Vanilla returns the constructor early when the square is water, leaving an animal with
      * no type, data or ID in the world. Its next update throws ({@code this.adef} is null)
@@ -121,6 +140,10 @@ public final class AnimalHooks {
         IsoGridSquare sq = self.getSquare();
         if (sq == null || !sq.isWaterSquare()) return false;
         boolean constructing = self.getAdef() == null;
+        // Animals in a trailer, inventory or hutch keep a stale square; leave them to vanilla.
+        if (!constructing && (self.getVehicle() != null || self.getContainer() != null || self.getHutch() != null)) {
+            return true;
+        }
         IsoGridSquare land = nearestLand(sq, 8);
         if (land != null) {
             String from = sq.getX() + "," + sq.getY() + "," + sq.getZ();
@@ -176,7 +199,7 @@ public final class AnimalHooks {
         }
         if (Quarantine.isFrozen(self)) return;
         try {
-            ORIGINAL_UPDATE.invokeExact(self);
+            Update.H.invokeExact(self);
             Quarantine.succeeded(self);
         } catch (VirtualMachineError e) {
             throw e;
@@ -188,7 +211,7 @@ public final class AnimalHooks {
     public static void updateLoopingSounds(IsoAnimal self) {
         if (AnimalOps.isGhost(self) || Quarantine.isFrozen(self)) return;
         try {
-            ORIGINAL_SOUNDS.invokeExact(self);
+            Sounds.H.invokeExact(self);
         } catch (VirtualMachineError e) {
             throw e;
         } catch (Throwable t) {
@@ -198,7 +221,7 @@ public final class AnimalHooks {
 
     public static void hutchUpdate(IsoHutch self) {
         try {
-            ORIGINAL_HUTCH_UPDATE.invokeExact(self);
+            HutchUpdate.H.invokeExact(self);
         } catch (VirtualMachineError e) {
             throw e;
         } catch (Throwable t) {
@@ -218,7 +241,7 @@ public final class AnimalHooks {
             return;
         }
         try {
-            ORIGINAL_REMOVE_FROM_WORLD.invokeExact(self);
+            RemoveFromWorld.H.invokeExact(self);
         } catch (VirtualMachineError e) {
             throw e;
         } catch (Throwable t) {
@@ -231,7 +254,7 @@ public final class AnimalHooks {
 
     public static void delete(IsoAnimal self) {
         try {
-            ORIGINAL_DELETE.invokeExact(self);
+            Delete.H.invokeExact(self);
         } catch (VirtualMachineError e) {
             throw e;
         } catch (Throwable t) {
@@ -245,7 +268,7 @@ public final class AnimalHooks {
     public static void unloaded(IsoAnimal self) {
         if (AnimalOps.isGhost(self)) return;
         try {
-            ORIGINAL_UNLOADED.invokeExact(self);
+            Unloaded.H.invokeExact(self);
         } catch (VirtualMachineError e) {
             throw e;
         } catch (Throwable t) {
@@ -275,7 +298,7 @@ public final class AnimalHooks {
         } catch (Throwable t) {
             Log.problem("chunk-unload-sweep", "ghost sweep before chunk unload failed", t);
         }
-        ORIGINAL_CHUNK_UNLOAD.invoke(manager, chunk);
+        ChunkUnload.H.invoke(manager, chunk);
     }
 
     public static void virtualizeAnimal(Object manager, IsoAnimal animal) throws Throwable {
@@ -283,7 +306,7 @@ public final class AnimalHooks {
             AnimalOps.removeGhost(animal, "virtualize");
             return;
         }
-        ORIGINAL_VIRTUALIZE.invoke(manager, animal);
+        Virtualize.H.invoke(manager, animal);
     }
 
     /** The population save serialises every animal in the update list; a ghost there throws. */
@@ -294,7 +317,7 @@ public final class AnimalHooks {
                 if (o instanceof IsoAnimal a && AnimalOps.isGhost(a) && !a.isOnHook()) AnimalOps.removeGhost(a, "save");
             }
         }
-        ORIGINAL_SAVE_REAL.invoke(manager);
+        SaveReal.H.invoke(manager);
     }
 
     // --- plumbing ---------------------------------------------------------------------------
