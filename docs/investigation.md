@@ -207,6 +207,10 @@ None of these produced a ghost, an exception or a stopped world update, on vanil
 
 After building the next stage, `AnimalData.grow` calls `parent.checkForWater()` and deletes both when it returns true. An animal that is on a water square when it grows disappears without a log line. Splint moves it to land instead. Animals in a trailer, an inventory or a hutch are not affected in practice: the game clears their square when they are stored, so the check finds no water (`stored-on-water-growth`: trailer chicks with a water position grew normally on vanilla and with Splint). Splint also never deletes a stored animal for it, in case one keeps a square.
 
+### 19. The dedicated server does not update zombies (code, reproduced: `server-zombie-update`)
+
+An earlier version of the README said the server updates zombies on a separate path that Splint does not wrap. That was wrong. `MovingObjectUpdateScheduler.startFrame` takes every `IsoZombie` aside when `GameServer.server` is set: it only adds it to its target player's chasing count (and calls `updateForServerGui` when the server runs with its GUI), then moves on without adding it to an update bucket. Connected clients simulate zombies; the server relays them. In the lab a zombie in the server's update list received no `OnZombieUpdate` events, and clearing its legs sprite, which `IsoZombie.updateInternal` dereferences, threw nothing, on vanilla and with Splint. A zombie therefore cannot stop the server's world update the way a ghost animal does, and there is no server-side zombie update for Splint to guard. Neither the incident report nor the reports it cites involve zombies.
+
 ### Still open
 
 - Which source made the incident server's first ghost. Finding 15 fits the report best. With Splint installed, every removed ghost is logged with its place, coordinates, map cell and nearby players, and `/splint problems` lists them, so a recurrence would name it.
