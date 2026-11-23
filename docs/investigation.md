@@ -16,6 +16,10 @@ The exact stack in the report (`AnimalData.grow → new IsoAnimal → checkForCh
 
 The report's hypothesis about IDs is right that IDs are not unique: they are `Rand.Next(10000)`. But random collisions are not what produces the crash. They cause a different, silent bug: an animal that grows next to another animal with the same ID is deleted together with its next stage.
 
+A ghost also breaks saving. While one exists, every save fails partway through the animal population (the console still prints "World saved") and the shutdown save never finishes, so a restart falls back to saves from before the ghost (finding 14). That is why the incident server needed a 20-hour rollback, and why the problem came back: the cause recurs. One cause fits the report's trailer clue and is reproduced: unloading a livestock trailer backed up to water builds the unloaded animals on a water square, where they come out half-built (finding 15). The other clues (logging in next to a trailer of chickens, carrying chickens or carcasses, butchering, Ovo Farms) were tested and ruled out (finding 16).
+
+Status: Splint 0.3.0 keeps every reproduced failure from stopping the world update or a save, and loses no animals in any lab scenario. Which cause made the incident server's first ghost is not proven (see "Still open").
+
 ## Findings
 
 ### 1. Animal IDs are random 0–9999 with no uniqueness check (code, reproduced)
