@@ -3,18 +3,17 @@ package splint.commands;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
-import java.util.LinkedHashMap;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.TreeMap;
-import java.util.function.Predicate;
 import splint.agent.SplintAgent;
 import splint.animals.AnimalIds;
 import splint.animals.AnimalOps;
-import splint.animals.AnimalOps.Area;
 import splint.animals.AnimalOps.Found;
 import splint.animals.AnimalOps.Place;
+import splint.animals.Incidents;
 import splint.animals.Quarantine;
 import splint.animals.Stats;
 import splint.core.Log;
@@ -31,9 +30,10 @@ import zombie.core.raknet.UdpConnection;
 import zombie.vehicles.BaseVehicle;
 
 /**
- * {@code /splint ...}: animal diagnostics and clean-up for admins. Works from the server
- * console, RCON and in-game chat. Every destructive form is a dry run unless it ends with
- * {@code confirm}; every action is written to the Splint log with the admin's name.
+ * {@code /splint ...}: animal diagnostics and clean-up for admins, from the server console,
+ * RCON or in-game chat. Replies go only to the admin who ran the command; nothing is ever
+ * broadcast to players. Destructive forms are dry runs unless they end with {@code confirm},
+ * and every change is written to the Splint log with the admin's name.
  */
 @CommandName(name = "splint")
 @CommandArgs(varArgs = true)
@@ -41,37 +41,37 @@ import zombie.vehicles.BaseVehicle;
 @RequiredCapability(requiredCapability = Capability.AnimalCheats)
 public class SplintCommand extends CommandBase {
     private static final int LIST_LIMIT = 25;
-    private static final int PLAYER_SCAN_RADIUS = 60;
+    private static final int PLAYER_LIST_LIMIT = 60;
 
     public SplintCommand(String username, Role userRole, String command, UdpConnection connection) {
         super(username, userRole, command, connection);
     }
 
     static final String HELP = String.join("\n",
-            "Splint " + SplintAgent.VERSION + " commands (destructive ones are dry runs until you add 'confirm'):",
-            "/splint status                         patch health, ID counter, counters",
-            "/splint animals census [AREA]          animals by map cell and type, ghosts, duplicate IDs, frozen",
-            "/splint animals list AREA [TYPE]       individual animals with ID, place and coordinates",
-            "/splint animals find ID                where the animal with this ID is",
-            "/splint animals kill AREA [TYPE] [confirm]   remove animals",
-            "/splint animals fixids [confirm]       give every duplicate animal ID a fresh unique one",
-            "/splint animals frozen [release|kill] [confirm]  animals frozen after repeated errors",
-            "AREA: cell CX CY | near X Y R | me R | hutch X Y Z | hutches cell CX CY | trailer VEHICLE_ID",
-            "      | trailers near X Y R | inventory USERNAME | ghosts | id ID | all",
-            "TYPE: an animal type (hen, chick, cow...), a group (chicken, cow, pig...), or ghost",
-            "Map cell = floor(x/256), floor(y/256); it is also the apop_CX_CY.bin population file.");
+            "Splint " + SplintAgent.VERSION + " (destructive commands are dry runs until you add 'confirm'):",
+            "/splint status                      patch health, ID counter, counters since start",
+            "/splint problems [N]                what Splint handled: by kind, worst cells (with who is there), last N",
+            "/splint players [SELECTION]         online players: position, map cell, animals around them",
+            "/splint animals census [SELECTION]  counts by map cell, place, type and stage; ghosts, duplicates, frozen",
+            "/splint animals list [SELECTION]    individual animals: ID, type, stage, place, coordinates",
+            "/splint animals find ID             where the animal with this ID is",
+            "/splint animals kill SELECTION [confirm]     remove animals (default places: world, hutch, trailer)",
+            "/splint animals fixids [SELECTION] [confirm] give duplicate IDs fresh unique ones",
+            "/splint animals frozen [release|kill] [confirm]",
+            "SELECTION terms combine, e.g.: cell 42 36 type chicken stage baby except hutch",
+            Selector.HELP);
+
+    static final class Usage extends RuntimeException {
+        Usage(String m) { super(m); }
+    }
 
     @Override
     protected String Command() {
-        String[] a = args();
+        List<String> a = new ArrayList<>();
+        for (int i = 0; i < getCommandArgsCount(); i++) a.add(getCommandArg(i));
         String result;
         try {
-            if (a.length == 0 || a[0].equalsIgnoreCase("help")) result = HELP;
-            else result = switch (a[0].toLowerCase(Locale.ROOT)) {
-                case "status" -> status();
-                case "animals", "animal", "a" -> animals(a);
-                default -> "Unknown /splint command '" + a[0] + "'.\n" + HELP;
-            };
+            result = dispatch(a);
         } catch (Usage u) {
             result = u.getMessage();
         } catch (Throwable t) {
@@ -82,9 +82,26 @@ public class SplintCommand extends CommandBase {
         return connection == null ? result : result.replace("\n", " <LINE> ");
     }
 
+    private String dispatch(List<String> a) {
+        if (a.isEmpty() || a.get(0).equalsIgnoreCase("help")) return HELP;
+        String verb = a.get(0).toLowerCase(Locale.ROOT);
+        List<String> rest = new ArrayList<>(a.subList(1, a.size()));
+        return switch (verb) {
+            case "status" -> status();
+            case "problems", "incidents" -> problems(rest);
+            case "players" -> players(rest);
+            case "animals", "animal", "a" -> animals(rest);
+            default -> throw new Usage("Unknown /splint command '" + a.get(0) + "'.\n" + HELP);
+        };
+    }
+
+    private String executor() {
+        return connection == null ? null : getExecutorUsername();
+    }
+
     /**
-     * Changes to the world must happen on the server's main thread. The console, RCON and
-     * in-game chat run commands there; the Discord bridge calls in from its own thread.
+     * World changes must run on the main thread. Console, RCON and chat commands do; the
+     * Discord bridge calls in from its own thread, so it gets read-only commands only.
      */
     private static void requireMainThread() {
         Thread main = zombie.network.GameServer.mainThread;
@@ -93,253 +110,141 @@ public class SplintCommand extends CommandBase {
         }
     }
 
-    private String[] args() {
-        String[] out = new String[getCommandArgsCount()];
-        for (int i = 0; i < out.length; i++) out[i] = getCommandArg(i);
-        return out;
-    }
-
-    private static final class Usage extends RuntimeException {
-        Usage(String m) { super(m); }
-    }
-
-    // --- status ---------------------------------------------------------------------------
+    // --- status, problems, players ----------------------------------------------------------
 
     private String status() {
-        StringBuilder b = new StringBuilder("Splint ").append(SplintAgent.VERSION).append(": ")
-                .append(SplintAgent.APPLIED.size()).append(" methods patched");
         var missing = SplintAgent.missing();
-        b.append(missing.isEmpty() ? ", none missing" : ", MISSING " + missing);
-        b.append('\n').append(AnimalIds.status());
-        b.append('\n').append(Stats.summary());
-        b.append("\nfrozen animals: ").append(Quarantine.frozen().size());
+        return "Splint " + SplintAgent.VERSION + ": " + SplintAgent.APPLIED.size() + " of " + SplintAgent.total()
+                + " patches applied" + (missing.isEmpty() ? ", none missing" : ", MISSING " + missing)
+                + "\n" + AnimalIds.status() + "\n" + Stats.summary() + "\nfrozen animals: " + Quarantine.frozen().size();
+    }
+
+    private String problems(List<String> r) {
+        int n = r.isEmpty() ? 10 : Selector.parse(r.get(0), "N");
+        Map<String, Long> kinds = Incidents.byKind();
+        if (kinds.isEmpty()) return "No animal problems since the server started.";
+        StringBuilder b = new StringBuilder("Animal problems handled since start: ").append(kinds);
+        b.append("\nWorst map cells:");
+        for (var e : Incidents.topCells(5)) {
+            String[] xy = e.getKey().split(",");
+            List<String> who = AnimalOps.playersInCell(Integer.parseInt(xy[0]), Integer.parseInt(xy[1]));
+            b.append("\n  cell ").append(e.getKey()).append(": ").append(e.getValue()).append(" (apop_")
+                    .append(xy[0]).append('_').append(xy[1]).append(".bin) players there now: ")
+                    .append(who.isEmpty() ? "none" : String.join(",", who));
+        }
+        b.append("\nLatest ").append(n).append(':');
+        for (Incidents.Incident i : Incidents.recent(n)) b.append("\n  ").append(i.line());
         return b.toString();
     }
 
-    // --- animals --------------------------------------------------------------------------
+    private String players(List<String> r) {
+        Selector s = r.isEmpty() ? null : Selector.parse(r, executor(), false);
+        List<IsoPlayer> online = AnimalOps.players();
+        if (online.isEmpty()) return "No players online.";
+        List<Found> animals = AnimalOps.all(null);
+        StringBuilder b = new StringBuilder(online.size() + " players online");
+        if (s != null) b.append(", showing those in: ").append(s.label());
+        int shown = 0;
+        for (IsoPlayer p : online) {
+            int px = (int) p.getX(), py = (int) p.getY(), pz = (int) p.getZ();
+            if (s != null && !s.coversPoint(px, py, pz)) continue;
+            Map<Place, Integer> near = new java.util.EnumMap<>(Place.class);
+            for (Found f : animals) {
+                if (Math.abs(f.x() - px) <= 30 && Math.abs(f.y() - py) <= 30) near.merge(f.place(), 1, Integer::sum);
+            }
+            if (shown++ < PLAYER_LIST_LIMIT) {
+                b.append('\n').append(p.getUsername()).append(" at ").append(px).append(',').append(py).append(',').append(pz)
+                        .append(" cell ").append(Math.floorDiv(px, AnimalOps.CELL)).append(',')
+                        .append(Math.floorDiv(py, AnimalOps.CELL)).append(" animals within 30: ")
+                        .append(near.isEmpty() ? "none" : near.toString());
+            }
+        }
+        if (shown > PLAYER_LIST_LIMIT) b.append("\n... ").append(shown - PLAYER_LIST_LIMIT).append(" more");
+        return b.toString();
+    }
 
-    private String animals(String[] a) {
-        if (a.length < 2) return HELP;
-        String verb = a[1].toLowerCase(Locale.ROOT);
-        List<String> rest = new ArrayList<>(List.of(a).subList(2, a.length));
+    // --- animals ------------------------------------------------------------------------------
+
+    private String animals(List<String> a) {
+        if (a.isEmpty()) return HELP;
+        String verb = a.get(0).toLowerCase(Locale.ROOT);
+        List<String> rest = new ArrayList<>(a.subList(1, a.size()));
         boolean confirm = rest.removeIf(s -> s.equalsIgnoreCase("confirm"));
         return switch (verb) {
-            case "census" -> census(rest.isEmpty() ? new Selection(null, f -> true, "all loaded animals") : select(rest));
-            case "list" -> list(select(rest));
+            case "census" -> census(Selector.parse(rest, executor(), false));
+            case "list" -> list(Selector.parse(rest, executor(), false));
             case "find" -> find(rest);
-            case "kill", "remove" -> kill(select(rest), confirm);
-            case "fixids" -> fixIds(confirm);
+            case "kill", "remove" -> {
+                if (rest.isEmpty()) throw new Usage("kill needs a SELECTION ('all' means every loaded animal).\n" + Selector.HELP);
+                yield kill(Selector.parse(rest, executor(), true), confirm);
+            }
+            case "fixids" -> fixIds(Selector.parse(rest, executor(), false), confirm);
             case "frozen" -> frozen(rest, confirm);
-            default -> throw new Usage("Unknown animals command '" + a[1] + "'.\n" + HELP);
+            default -> throw new Usage("Unknown animals command '" + a.get(0) + "'.\n" + HELP);
         };
     }
 
-    /** An area to scan plus a filter over what is found there. */
-    private static class Selection {
-        private final Area scan;
-        private final Predicate<Found> filter;
-        private final String label;
-
-        Selection(Area scan, Predicate<Found> filter, String label) {
-            this.scan = scan;
-            this.filter = filter;
-            this.label = label;
-        }
-
-        Area scan() { return scan; }
-        Predicate<Found> filter() { return filter; }
-        String label() { return label; }
-
-        List<Found> run() {
-            List<Found> out = new ArrayList<>();
-            for (Found f : AnimalOps.all(scan)) if (filter.test(f)) out.add(f);
-            out.sort(Comparator.comparingInt(Found::x).thenComparingInt(Found::y));
-            return out;
-        }
-    }
-
-    private Selection select(List<String> r) {
-        if (r.isEmpty()) throw new Usage("Missing AREA.\n" + HELP);
-        String kind = r.get(0).toLowerCase(Locale.ROOT);
-        Selection base;
-        int used;
-        switch (kind) {
-            case "cell" -> {
-                int cx = num(r, 1), cy = num(r, 2);
-                base = new Selection(Area.cell(cx, cy), f -> true, "map cell " + cx + "," + cy);
-                used = 3;
-            }
-            case "near" -> {
-                int x = num(r, 1), y = num(r, 2), rad = Math.min(num(r, 3), 300);
-                base = new Selection(Area.radius(x, y, rad), f -> true, "within " + rad + " of " + x + "," + y);
-                used = 4;
-            }
-            case "me" -> {
-                IsoPlayer p = self();
-                int rad = Math.min(num(r, 1), 300);
-                base = new Selection(Area.radius((int) p.getX(), (int) p.getY(), rad), f -> true,
-                        "within " + rad + " of " + getExecutorUsername());
-                used = 2;
-            }
-            case "hutch" -> {
-                int x = num(r, 1), y = num(r, 2), z = num(r, 3);
-                base = new Selection(null, f -> f.place() == Place.HUTCH && f.x() == x && f.y() == y && f.z() == z,
-                        "hutch at " + x + "," + y + "," + z);
-                used = 4;
-            }
-            case "hutches" -> {
-                if (r.size() < 2 || !r.get(1).equalsIgnoreCase("cell")) throw new Usage("Use: hutches cell CX CY");
-                int cx = num(r, 2), cy = num(r, 3);
-                Area cell = Area.cell(cx, cy);
-                base = new Selection(null, f -> f.place() == Place.HUTCH && cell.contains(f.x(), f.y(), f.z()),
-                        "hutches in map cell " + cx + "," + cy);
-                used = 4;
-            }
-            case "trailer" -> {
-                int id = num(r, 1);
-                base = new Selection(null, f -> f.place() == Place.TRAILER && ((BaseVehicle) f.holder()).getId() == id,
-                        "trailer vehicle " + id);
-                used = 2;
-            }
-            case "trailers" -> {
-                if (r.size() < 2 || !r.get(1).equalsIgnoreCase("near")) throw new Usage("Use: trailers near X Y R");
-                int x = num(r, 2), y = num(r, 3), rad = num(r, 4);
-                Area area = Area.radius(x, y, rad);
-                base = new Selection(null, f -> f.place() == Place.TRAILER && area.contains(f.x(), f.y(), f.z()),
-                        "trailers within " + rad + " of " + x + "," + y);
-                used = 5;
-            }
-            case "inventory" -> {
-                if (r.size() < 2) throw new Usage("Use: inventory USERNAME");
-                String user = r.get(1);
-                base = new Selection(null, f -> f.place() == Place.INVENTORY && holderName(f).equalsIgnoreCase(user),
-                        "carried by " + user);
-                used = 2;
-            }
-            case "ghosts", "ghost" -> {
-                base = new Selection(null, f -> AnimalOps.isGhost(f.animal()), "uninitialised (ghost) animals");
-                // Ghosts can be referenced only by a square, so scan around every player too.
-                return withPlayerSquares(base);
-            }
-            case "id" -> {
-                int id = num(r, 1);
-                base = new Selection(null, f -> f.animal().getAnimalID() == id, "animal id " + id);
-                used = 2;
-            }
-            case "all" -> {
-                base = new Selection(null, f -> true, "all loaded animals");
-                used = 1;
-            }
-            default -> throw new Usage("Unknown AREA '" + r.get(0) + "'.\n" + HELP);
-        }
-        if (r.size() > used) {
-            String type = r.get(used);
-            Predicate<Found> t = AnimalOps.ofType(type);
-            Predicate<Found> f = base.filter();
-            return new Selection(base.scan(), x -> f.test(x) && t.test(x), base.label() + ", type " + type);
-        }
-        return base;
-    }
-
-    private Selection withPlayerSquares(Selection base) {
-        return new Selection(null, base.filter(), base.label()) {
-            @Override
-            List<Found> run() {
-                Map<IsoAnimal, Found> all = new java.util.IdentityHashMap<>();
-                for (Found f : AnimalOps.all(null)) all.put(f.animal(), f);
-                for (IsoPlayer p : AnimalOps.players()) {
-                    for (Found f : AnimalOps.all(Area.radius((int) p.getX(), (int) p.getY(), PLAYER_SCAN_RADIUS))) {
-                        all.putIfAbsent(f.animal(), f);
-                    }
-                }
-                List<Found> out = new ArrayList<>();
-                for (Found f : all.values()) if (base.filter().test(f)) out.add(f);
-                return out;
-            }
-        };
-    }
-
-    private IsoPlayer self() {
-        if (connection == null) throw new Usage("'me' needs an in-game admin; use 'near X Y R' from the console.");
-        for (IsoPlayer p : AnimalOps.players()) if (p.getUsername().equalsIgnoreCase(getExecutorUsername())) return p;
-        throw new Usage("Cannot find your character.");
-    }
-
-    private static int num(List<String> r, int i) {
-        if (r.size() <= i) throw new Usage("Missing number at position " + (i + 1) + ".\n" + HELP);
-        try {
-            return Integer.parseInt(r.get(i));
-        } catch (NumberFormatException e) {
-            throw new Usage("Not a number: '" + r.get(i) + "'");
-        }
-    }
-
-    private static String holderName(Found f) {
-        for (IsoPlayer p : AnimalOps.players()) {
-            try {
-                if (p.getInventory().getAllTypeRecurse("Animal").contains(f.holder())) return p.getUsername();
-            } catch (Throwable ignored) {
-                // inventory not readable; skip this player
-            }
-        }
-        return "";
-    }
-
-    private static String where(Found f) {
+    static String where(Found f) {
         String at = f.x() + "," + f.y() + "," + f.z() + " cell " + f.cellX() + "," + f.cellY();
         return switch (f.place()) {
             case WORLD -> "map " + at;
             case HUTCH -> "hutch " + at;
             case TRAILER -> "trailer #" + ((BaseVehicle) f.holder()).getId() + " " + at;
-            case INVENTORY -> "inventory of " + holderName(f) + " " + at;
+            case INVENTORY -> "carried by " + Selector.carrier(f) + " " + at;
         };
     }
 
     private static String line(Found f) {
         IsoAnimal a = f.animal();
-        String type = AnimalOps.isGhost(a) ? "GHOST" : a.getAnimalType();
         String frozen = Quarantine.isFrozen(a) ? " FROZEN(" + Quarantine.lastError(a) + ")" : "";
-        return "id " + a.getAnimalID() + " " + type + " - " + where(f) + frozen;
+        String stage = AnimalOps.isGhost(a) ? "" : AnimalOps.isJuvenile(a) ? " baby" : " adult";
+        return AnimalOps.brief(a) + stage + " - " + where(f) + frozen;
     }
 
-    private String census(Selection s) {
+    private String census(Selector s) {
         List<Found> found = s.run();
         Map<String, Map<String, Integer>> byCell = new TreeMap<>();
+        Map<Place, Integer> byPlace = new java.util.EnumMap<>(Place.class);
         Map<Integer, Integer> ids = new HashMap<>();
-        int ghosts = 0, frozen = 0;
-        Map<Place, Integer> byPlace = new LinkedHashMap<>();
+        int ghosts = 0, frozen = 0, babies = 0;
         for (Found f : found) {
             IsoAnimal a = f.animal();
             boolean ghost = AnimalOps.isGhost(a);
-            if (ghost) ghosts++;
+            if (ghost) {
+                ghosts++;
+            } else {
+                ids.merge(a.getAnimalID(), 1, Integer::sum);
+                if (AnimalOps.isJuvenile(a)) babies++;
+            }
             if (Quarantine.isFrozen(a)) frozen++;
             byPlace.merge(f.place(), 1, Integer::sum);
-            String cell = f.cellX() + "," + f.cellY();
-            byCell.computeIfAbsent(cell, k -> new TreeMap<>()).merge(ghost ? "GHOST" : a.getAnimalType(), 1, Integer::sum);
-            if (!ghost) ids.merge(a.getAnimalID(), 1, Integer::sum);
+            byCell.computeIfAbsent(f.cellX() + "," + f.cellY(), k -> new TreeMap<>())
+                    .merge(ghost ? "GHOST" : a.getAnimalType(), 1, Integer::sum);
         }
         long dupGroups = ids.values().stream().filter(n -> n > 1).count();
         StringBuilder b = new StringBuilder("Census of ").append(s.label()).append(": ").append(found.size())
-                .append(" animals ").append(byPlace).append(", ghosts ").append(ghosts).append(", frozen ")
-                .append(frozen).append(", duplicate-ID groups ").append(dupGroups);
-        int shown = 0;
-        for (var e : byCell.entrySet()) {
-            if (shown++ == LIST_LIMIT) {
-                b.append("\n... ").append(byCell.size() - LIST_LIMIT).append(" more cells (see Splint log)");
-                break;
-            }
+                .append(" animals ").append(byPlace).append(", babies ").append(babies).append(", ghosts ").append(ghosts)
+                .append(", frozen ").append(frozen).append(", duplicate-ID groups ").append(dupGroups);
+        List<Map.Entry<String, Map<String, Integer>>> cells = new ArrayList<>(byCell.entrySet());
+        cells.sort(Comparator.comparingInt(e -> -e.getValue().values().stream().mapToInt(Integer::intValue).sum()));
+        for (int i = 0; i < cells.size() && i < LIST_LIMIT; i++) {
+            var e = cells.get(i);
             int total = e.getValue().values().stream().mapToInt(Integer::intValue).sum();
-            b.append("\ncell ").append(e.getKey()).append(": ").append(total).append(' ').append(e.getValue());
+            String[] xy = e.getKey().split(",");
+            List<String> who = AnimalOps.playersInCell(Integer.parseInt(xy[0]), Integer.parseInt(xy[1]));
+            b.append("\ncell ").append(e.getKey()).append(": ").append(total).append(' ').append(e.getValue())
+                    .append(" players: ").append(who.isEmpty() ? "none" : String.join(",", who));
         }
+        if (cells.size() > LIST_LIMIT) b.append("\n... ").append(cells.size() - LIST_LIMIT).append(" more cells (see the Splint log)");
         Log.info("/splint census by " + getExecutorUsername() + ": " + b.toString().replace('\n', '|'));
         return b.toString();
     }
 
-    private String list(Selection s) {
+    private String list(Selector s) {
         List<Found> found = s.run();
         StringBuilder b = new StringBuilder(s.label()).append(": ").append(found.size()).append(" animals");
         for (int i = 0; i < found.size() && i < LIST_LIMIT; i++) b.append('\n').append(line(found.get(i)));
-        if (found.size() > LIST_LIMIT) b.append("\n... ").append(found.size() - LIST_LIMIT).append(" more (full list in Splint log)");
+        if (found.size() > LIST_LIMIT) b.append("\n... ").append(found.size() - LIST_LIMIT).append(" more (full list in the Splint log)");
         StringBuilder full = new StringBuilder();
         for (Found f : found) full.append("\n  ").append(AnimalOps.describe(f.animal())).append(" place=").append(where(f));
         Log.info("/splint list " + s.label() + " by " + getExecutorUsername() + ":" + full);
@@ -347,25 +252,32 @@ public class SplintCommand extends CommandBase {
     }
 
     private String find(List<String> r) {
-        int id = num(r, 0);
-        List<Found> found = new Selection(null, f -> f.animal().getAnimalID() == id, "id " + id).run();
+        if (r.isEmpty()) throw new Usage("find needs an animal ID");
+        int id = Selector.parse(r.get(0), "ID");
+        List<Found> found = Selector.parse(List.of("id", String.valueOf(id)), executor(), false).run();
         if (found.isEmpty()) return "No loaded animal has id " + id + " (animals in unloaded areas are not in memory).";
         StringBuilder b = new StringBuilder();
-        for (Found f : found) b.append(line(f)).append('\n').append("  ").append(AnimalOps.describe(f.animal())).append('\n');
-        if (found.size() > 1) b.append("WARNING: ").append(found.size()).append(" animals share this id; /splint animals fixids");
+        for (Found f : found) b.append(line(f)).append("\n  ").append(AnimalOps.describe(f.animal())).append('\n');
+        if (found.size() > 1) {
+            b.append("WARNING: ").append(found.size()).append(" animals share this id; /splint animals fixids id ").append(id);
+        }
         return b.toString().stripTrailing();
     }
 
-    private String kill(Selection s, boolean confirm) {
+    private String kill(Selector s, boolean confirm) {
         List<Found> found = s.run();
         if (found.isEmpty()) return "Nothing matches " + s.label() + ".";
         Map<String, Integer> types = new TreeMap<>();
-        for (Found f : found) types.merge(AnimalOps.isGhost(f.animal()) ? "GHOST" : f.animal().getAnimalType(), 1, Integer::sum);
-        if (confirm) requireMainThread();
-        if (!confirm) {
-            return "Dry run: would remove " + found.size() + " animals (" + s.label() + ") " + types
-                    + ". Repeat the command with 'confirm' at the end to remove them.";
+        Map<Place, Integer> places = new java.util.EnumMap<>(Place.class);
+        for (Found f : found) {
+            types.merge(AnimalOps.isGhost(f.animal()) ? "GHOST" : f.animal().getAnimalType(), 1, Integer::sum);
+            places.merge(f.place(), 1, Integer::sum);
         }
+        if (!confirm) {
+            return "Dry run: would remove " + found.size() + " animals (" + s.label() + ") " + types + " " + places
+                    + ". Repeat with 'confirm' at the end to remove them.";
+        }
+        requireMainThread();
         int removed = 0;
         List<String> failed = new ArrayList<>();
         StringBuilder audit = new StringBuilder();
@@ -379,27 +291,31 @@ public class SplintCommand extends CommandBase {
                 failed.add(f.animal().getAnimalID() + ": " + err);
             }
         }
-        Log.info("/splint kill " + s.label() + " by " + getExecutorUsername() + ": removed " + removed + audit);
-        return "Removed " + removed + " of " + found.size() + " animals (" + s.label() + ") " + types
+        Log.info("/splint kill " + s.label() + " by " + getExecutorUsername() + ": removed " + removed + " of " + found.size() + audit);
+        return "Removed " + removed + " of " + found.size() + " animals (" + s.label() + ") " + types + " " + places
                 + (failed.isEmpty() ? "" : "; failed: " + failed);
     }
 
-    private String fixIds(boolean confirm) {
+    private String fixIds(Selector s, boolean confirm) {
         Map<Integer, List<Found>> byId = new HashMap<>();
         for (Found f : AnimalOps.all(null)) {
             if (!AnimalOps.isGhost(f.animal())) byId.computeIfAbsent(f.animal().getAnimalID(), k -> new ArrayList<>()).add(f);
         }
+        Map<IsoAnimal, Boolean> selected = new IdentityHashMap<>();
+        for (Found f : s.run()) selected.put(f.animal(), true);
         List<Found> toFix = new ArrayList<>();
         for (List<Found> group : byId.values()) {
             if (group.size() < 2) continue;
             // Babies find their mother by ID: the animal with babies keeps the ID.
             group.sort(Comparator.comparingInt((Found f) -> -babies(f.animal()).size()));
-            toFix.addAll(group.subList(1, group.size()));
+            for (Found f : group.subList(1, group.size())) if (selected.containsKey(f.animal())) toFix.add(f);
         }
-        if (toFix.isEmpty()) return "No duplicate animal IDs among loaded animals.";
-        if (confirm) requireMainThread();
-        if (!confirm) return "Dry run: " + toFix.size() + " animals share an ID with another loaded animal. "
-                + "Add 'confirm' to give each a fresh unique ID (the first of each group keeps its ID).";
+        if (toFix.isEmpty()) return "No duplicate animal IDs among the selected loaded animals.";
+        if (!confirm) {
+            return "Dry run: " + toFix.size() + " selected animals share an ID with another loaded animal. "
+                    + "Add 'confirm' to give each a fresh unique ID (in each group the animal with babies keeps its ID).";
+        }
+        requireMainThread();
         StringBuilder audit = new StringBuilder();
         for (Found f : toFix) {
             int old = f.animal().getAnimalID();
@@ -413,7 +329,7 @@ public class SplintCommand extends CommandBase {
             audit.append("\n  ").append(old).append(" -> ").append(fresh).append(' ').append(where(f));
         }
         Log.info("/splint fixids by " + getExecutorUsername() + ":" + audit);
-        return "Gave " + toFix.size() + " animals fresh unique IDs (details in Splint log).";
+        return "Gave " + toFix.size() + " animals fresh unique IDs (details in the Splint log).";
     }
 
     private static List<IsoAnimal> babies(IsoAnimal a) {
@@ -425,18 +341,19 @@ public class SplintCommand extends CommandBase {
         List<IsoAnimal> frozen = Quarantine.frozen();
         if (frozen.isEmpty()) return "No frozen animals.";
         String action = r.isEmpty() ? "list" : r.get(0).toLowerCase(Locale.ROOT);
-        if (confirm) requireMainThread();
-        Map<IsoAnimal, Found> places = new java.util.IdentityHashMap<>();
+        Map<IsoAnimal, Found> places = new IdentityHashMap<>();
         for (Found f : AnimalOps.all(null)) places.put(f.animal(), f);
         switch (action) {
             case "release" -> {
                 if (!confirm) return "Dry run: would release " + frozen.size() + " frozen animals. Add 'confirm'.";
+                requireMainThread();
                 frozen.forEach(Quarantine::release);
                 Log.info("/splint frozen release by " + getExecutorUsername() + ": " + frozen.size());
                 return "Released " + frozen.size() + " animals; they will be updated again.";
             }
             case "kill" -> {
                 if (!confirm) return "Dry run: would remove " + frozen.size() + " frozen animals. Add 'confirm'.";
+                requireMainThread();
                 int n = 0;
                 for (IsoAnimal a : frozen) {
                     Found f = places.getOrDefault(a, new Found(a, Place.WORLD, null, (int) a.getX(), (int) a.getY(), (int) a.getZ()));

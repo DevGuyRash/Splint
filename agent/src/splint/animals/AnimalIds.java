@@ -42,6 +42,27 @@ public final class AnimalIds {
 
     private AnimalIds() {}
 
+    /** Set while IsoAnimal.load runs: load calls init, then restores the saved ID. */
+    private static final ThreadLocal<Boolean> LOADING = ThreadLocal.withInitial(() -> false);
+
+    /**
+     * Replaces vanilla's {@code Rand.Next(10000)} at the one place an animal ID is generated
+     * (IsoAnimal.init). {@code vanillaBound} is the ignored 10000. During a load no ID is
+     * consumed: the saved one is written right after init returns.
+     */
+    public static int next(int vanillaBound) {
+        return LOADING.get() ? -1 : allocate();
+    }
+
+    /** Runs {@code load} with ID allocation suspended, then records the restored ID. */
+    public static void loading(boolean on) {
+        LOADING.set(on);
+    }
+
+    public static boolean isLoading() {
+        return LOADING.get();
+    }
+
     public static synchronized int allocate() {
         ensureLoaded();
         if (next >= reservedUntil) reserve();

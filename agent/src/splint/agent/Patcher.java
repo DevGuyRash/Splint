@@ -47,18 +47,36 @@ public final class Patcher {
         String key() { return name + descriptor; }
     }
 
+    /**
+     * Inside {@code owner.method}, replaces a static call {@code callOwner.callName callDesc}
+     * whose result is stored straight into the field {@code storeField} of the class, with a
+     * call to {@code newOwner.callName}-compatible static {@code newName} of the same descriptor.
+     * Used where vanilla computes a value badly in one expression (the animal ID) and the fix is
+     * to compute it correctly there, not to overwrite it afterwards.
+     */
+    public record Redirect(String owner, String method, String methodDesc, String callOwner, String callName,
+                           String callDesc, String storeField, String newOwner, String newName) {
+        public String key() { return owner + "." + method + methodDesc + "@" + callOwner + "." + callName; }
+    }
+
     private Patcher() {}
 
     /** Returns the rewritten class, or {@code null} when none of the patches apply to it. */
     public static byte[] apply(byte[] classBytes, List<Patch> patches, Set<String> applied) {
+        return apply(classBytes, patches, List.of(), applied);
+    }
+
+    public static byte[] apply(byte[] classBytes, List<Patch> patches, List<Redirect> redirects, Set<String> applied) {
         ClassFile cf = ClassFile.of();
         ClassModel model = cf.parse(classBytes);
         Map<String, Patch> byKey = new java.util.HashMap<>();
         for (Patch p : patches) byKey.put(p.key(), p);
+        Map<String, List<Redirect>> redirectsByMethod = new java.util.HashMap<>();
+        for (Redirect r : redirects) redirectsByMethod.computeIfAbsent(r.method() + r.methodDesc(), k -> new ArrayList<>()).add(r);
         Set<String> present = new HashSet<>();
         for (MethodModel m : model.methods()) {
             String key = m.methodName().stringValue() + m.methodType().stringValue();
-            if (byKey.containsKey(key)) present.add(key);
+            if (byKey.containsKey(key) || redirectsByMethod.containsKey(key)) present.add(key);
         }
         if (present.isEmpty()) return null;
         ClassDesc owner = model.thisClass().asSymbol();
@@ -69,6 +87,12 @@ public final class Patcher {
             }
             String key = method.methodName().stringValue() + method.methodType().stringValue();
             Patch patch = byKey.get(key);
+            List<Redirect> rs = redirectsByMethod.get(key);
+            if (patch == null && rs != null) {
+                cb.transformMethod(method, java.lang.classfile.MethodTransform.transformingCode(
+                        java.lang.classfile.CodeTransform.ofStateful(() -> new RedirectCalls(rs, owner, applied))));
+                return;
+            }
             if (patch == null) {
                 cb.with(element);
                 return;
@@ -114,6 +138,63 @@ public final class Patcher {
             applied.add(patch.owner() + "." + key);
         };
         return cf.transformClass(model, transform);
+    }
+
+    /**
+     * Holds back a matching invoke until the next instruction shows whether its result goes
+     * straight into the target field; only then is the call replaced.
+     */
+    private static final class RedirectCalls implements java.lang.classfile.CodeTransform {
+        private final List<Redirect> redirects;
+        private final ClassDesc owner;
+        private final Set<String> applied;
+        private java.lang.classfile.instruction.InvokeInstruction held;
+        private Redirect heldFor;
+
+        RedirectCalls(List<Redirect> redirects, ClassDesc owner, Set<String> applied) {
+            this.redirects = redirects;
+            this.owner = owner;
+            this.applied = applied;
+        }
+
+        @Override
+        public void accept(java.lang.classfile.CodeBuilder b, java.lang.classfile.CodeElement e) {
+            if (held != null && !(e instanceof java.lang.classfile.Instruction)) {
+                b.with(e);           // line numbers and other markers do not break the match
+                return;
+            }
+            if (held != null) {
+                Redirect r = heldFor;
+                java.lang.classfile.instruction.InvokeInstruction call = held;
+                held = null;
+                heldFor = null;
+                if (e instanceof java.lang.classfile.instruction.FieldInstruction f
+                        && f.opcode() == java.lang.classfile.Opcode.PUTFIELD
+                        && f.owner().asSymbol().equals(owner) && f.name().equalsString(r.storeField())) {
+                    b.invokestatic(ClassDesc.ofInternalName(r.newOwner()), r.newName(), call.typeSymbol());
+                    applied.add(r.key());
+                } else {
+                    b.with(call);
+                }
+            }
+            if (e instanceof java.lang.classfile.instruction.InvokeInstruction inv
+                    && inv.opcode() == java.lang.classfile.Opcode.INVOKESTATIC) {
+                for (Redirect r : redirects) {
+                    if (inv.owner().asInternalName().equals(r.callOwner()) && inv.name().equalsString(r.callName())
+                            && inv.type().equalsString(r.callDesc())) {
+                        held = inv;
+                        heldFor = r;
+                        return;
+                    }
+                }
+            }
+            b.with(e);
+        }
+
+        @Override
+        public void atEnd(java.lang.classfile.CodeBuilder b) {
+            if (held != null) b.with(held);
+        }
     }
 
     private static boolean isAnnotation(MethodElement me) {

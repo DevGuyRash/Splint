@@ -9,6 +9,8 @@ Splint is a server-side fix and admin-tools patch for Project Zomboid Build 42. 
 - Each hook needs a reproduced failure behind it, recorded in `docs/investigation.md` with the lab scenario that shows it. Do not add speculative patches.
 - A hook must never throw into the game loop for an animal-specific problem. Catch, log with `AnimalOps.describe` (type, ID, coordinates, map cell, apop file, container, nearest player) and continue. Rethrow `VirtualMachineError`.
 - Logging goes through `splint.core.Log`; repeating problems use `Log.problem` with a stable key so they are rate limited.
+- Inside the class transformer, call nothing from the game and never use `System.out` (the game replaces it with its own logger). Use `Log.boot`. The JVM silently discards a transformer's result when it throws, and `IsoAnimal` loads before the game's logging exists, so a logging call there once left the server running completely unpatched.
+- To take an animal out of the update list, remove it from `IsoCell.getObjectList()` directly, as vanilla `IsoAnimal.removeFromWorld` does. The cell's deferred remove list skips every living `IsoPlayer`, and animals are `IsoPlayer`s.
 - Admin commands are dry runs unless they end with `confirm`, and every destructive action is written to the Splint log with the admin's name.
 - Verify every game method you call exists in the installed build (`javap -cp projectzomboid.jar`). After a game update, run `python3 build.py --verify` to see which patches no longer apply.
 

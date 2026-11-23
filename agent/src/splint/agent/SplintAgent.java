@@ -30,8 +30,7 @@ public final class SplintAgent {
     private static final String COMMAND_HOOKS = "splint/commands/CommandHooks";
 
     static final List<Patch> PATCHES = List.of(
-            // Identity: unique IDs for new animals, loaded IDs observed and de-duplicated.
-            new Patch(ANIMAL, "init", "(Lzombie/characters/animals/datas/AnimalBreed;)V", ANIMAL_HOOKS, "init"),
+            // Identity: IDs restored from a save are recorded so the allocator never issues them.
             new Patch(ANIMAL, "load", "(Ljava/nio/ByteBuffer;IZ)V", ANIMAL_HOOKS, "load"),
             // Construction: the checks that leave half-built animals in the world.
             new Patch(ANIMAL, "checkForChickenpocalypse", "(Lzombie/characters/animals/IsoAnimal;)Z", ANIMAL_HOOKS, "checkForChickenpocalypse"),
@@ -52,6 +51,15 @@ public final class SplintAgent {
             new Patch(COMMAND_BASE, "findCommandCls", "(Ljava/lang/String;)Ljava/lang/Class;", COMMAND_HOOKS, "findCommandCls"),
             new Patch(COMMAND_BASE, "getSubClasses", "()[Ljava/lang/Class;", COMMAND_HOOKS, "getSubClasses"));
 
+    /**
+     * Call sites replaced in place. Vanilla's only source of new animal IDs is
+     * {@code this.animalId = Rand.Next(10000)} in IsoAnimal.init; that call now goes to the
+     * unique allocator, so no random ID is ever generated.
+     */
+    static final List<Patcher.Redirect> REDIRECTS = List.of(
+            new Patcher.Redirect(ANIMAL, "init", "(Lzombie/characters/animals/datas/AnimalBreed;)V",
+                    "zombie/core/random/Rand", "Next", "(I)I", "animalId", "splint/animals/AnimalIds", "next"));
+
     /** Patches actually applied, as {@code owner.nameDescriptor}; reported by /splint status. */
     public static final Set<String> APPLIED = ConcurrentHashMap.newKeySet();
     /** Game classes the transformer has seen load. */
@@ -61,16 +69,20 @@ public final class SplintAgent {
 
     public static void premain(String args, Instrumentation inst) {
         Map<String, List<Patch>> byOwner = PATCHES.stream().collect(Collectors.groupingBy(Patch::owner));
+        Map<String, List<Patcher.Redirect>> redirectsByOwner = REDIRECTS.stream()
+                .collect(Collectors.groupingBy(Patcher.Redirect::owner));
         inst.addTransformer(new ClassFileTransformer() {
             @Override
             public byte[] transform(Module module, ClassLoader loader, String name, Class<?> redefined,
                                     ProtectionDomain domain, byte[] bytes) {
-                List<Patch> patches = name == null ? null : byOwner.get(name);
-                if (patches == null) return null;
+                if (name == null) return null;
+                List<Patch> patches = byOwner.getOrDefault(name, List.of());
+                List<Patcher.Redirect> redirects = redirectsByOwner.getOrDefault(name, List.of());
+                if (patches.isEmpty() && redirects.isEmpty()) return null;
                 LOADED.add(name);
                 byte[] out;
                 try {
-                    out = Patcher.apply(bytes, patches, APPLIED);
+                    out = Patcher.apply(bytes, patches, redirects, APPLIED);
                 } catch (Throwable t) {
                     // Never take the server down over a patch: run that class unpatched.
                     Log.boot("could not patch " + name + "; running it unpatched", t);
@@ -78,12 +90,12 @@ public final class SplintAgent {
                 }
                 // The JVM discards a transformer's result if it throws, so report only through
                 // the boot log, which cannot throw or call back into game code.
-                Log.boot("patched " + name.replace('/', '.') + " (" + patches.size() + " method(s), loader "
+                Log.boot("patched " + name.replace('/', '.') + " (" + (patches.size() + redirects.size()) + " change(s), loader "
                         + (loader == null ? "bootstrap" : loader.getClass().getSimpleName()) + ")", null);
                 return out;
             }
         });
-        Log.boot("Splint " + VERSION + " agent loaded (" + PATCHES.size() + " patches registered)", null);
+        Log.boot("Splint " + VERSION + " agent loaded (" + total() + " patches registered)", null);
     }
 
     /**
@@ -91,8 +103,15 @@ public final class SplintAgent {
      * changed its signature. Classes that have not loaded yet are not counted.
      */
     public static List<String> missing() {
-        return PATCHES.stream().filter(p -> LOADED.contains(p.owner()))
+        List<String> out = new java.util.ArrayList<>(PATCHES.stream().filter(p -> LOADED.contains(p.owner()))
                 .map(p -> p.owner() + "." + p.name() + p.descriptor())
-                .filter(k -> !APPLIED.contains(k)).toList();
+                .filter(k -> !APPLIED.contains(k)).toList());
+        REDIRECTS.stream().filter(r -> LOADED.contains(r.owner()) && !APPLIED.contains(r.key()))
+                .forEach(r -> out.add(r.key()));
+        return out;
+    }
+
+    public static int total() {
+        return PATCHES.size() + REDIRECTS.size();
     }
 }

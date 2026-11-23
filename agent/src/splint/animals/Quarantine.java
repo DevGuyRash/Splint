@@ -67,6 +67,7 @@ public final class Quarantine {
                 detail = "failure " + s.consecutive + " of " + FAILURES_TO_FREEZE + " before freezing";
             }
         }
+        Incidents.record(phase + " threw " + t.getClass().getSimpleName() + (froze ? ", frozen" : ""), a);
         String key = "animal-" + phase + ":" + t.getClass().getName() + ":" + firstLine(t.getMessage());
         Log.problem("ERROR", key, "animal " + phase + " threw " + t + "; contained, world update continues; " + detail
                 + "; " + AnimalOps.describe(a), froze ? null : t);

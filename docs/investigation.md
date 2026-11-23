@@ -80,7 +80,13 @@ What differs for unloaded animals is how time is applied:
 
 So a server on "Very Fast" ages every animal 10×, everywhere. Nothing is extra for empty chunks.
 
-### 9. Lab scenarios
+### 9. Hutches, trailers and inventories (reproduced)
+
+- **Hutch:** chicks past their growth age stay chicks while inside (`IsoHutch.updateAnimalInside` has no stage check). On release they all grow on the next frames, at the hutch's exit square. A hutch therefore concentrates growth events, all of them at one spot, which is exactly where a nearby ghost does the most damage.
+- **Trailer:** juveniles in a livestock trailer grow in place and keep their IDs (`replaceGrownAnimalInTrailer`). The next stage is still constructed at the trailer animal's stored coordinates first, so the constructor's water and duplicate checks run there. Unloading a trailer constructs the animal at the trailer's "AnimalEntry" area, another spot that can be a water square.
+- **Inventory:** see the open questions.
+
+### 10. Lab scenarios
 
 Each scenario runs in a fresh session. Results: `vanilla` without Splint, `splint` with it.
 
@@ -89,4 +95,5 @@ RESULTS_TABLE
 ## Open questions
 
 - The first ghost on the incident server is not identified. Water squares, a removed animal mod's type, and trailer unloading at the water's edge all produce one in vanilla. A log from before the first error, or `/splint animals census` on the affected cells with Splint installed, would show which one.
-- Whether the rollback helped because it removed a ghost-producing situation from the save, or only because the restart cleared in-memory ghosts, cannot be told from the report. Ghosts are never saved (they are not in the update list the population save reads). A restart alone clears them, until the situation that creates them recurs.
+- Whether the rollback helped because it removed a ghost-producing situation from the save, or only because the restart cleared in-memory ghosts, cannot be told from the report. Ghosts left only on a square (finding 5) are never saved. Ghosts still in the update list (findings 3 and 4) are handed to the population save, where `IsoAnimal.save` dereferences their null data (code; not reproduced in the lab). A restart clears the in-memory ones until the situation that creates them recurs.
+- A carried juvenile that reaches its growth age leaves the inventory: `grow` removes the inventory item, and the next stage is created at the animal's stored map position (lab `inventory-growth`). Where that position is and whether it is loaded decides where the grown animal ends up. This is the most concrete mechanism found for the "ghost chicken in my pocket" account, but it was not linked to the incident.

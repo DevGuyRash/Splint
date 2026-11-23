@@ -96,6 +96,16 @@ def fresh_spot(s: Session, dx: int) -> tuple[int, int]:
     return here(s)
 
 
+def tick_rate(s: Session, window: float = 20) -> float:
+    """Server world-update ticks per second, from the fixture's heartbeat (0 when stopped)."""
+    off = s.log_size()
+    time.sleep(window)
+    ticks = [int(m) for m in re.findall(r"\[SPLAB-S\] HB (\d+)", s.log_since(off))]
+    if len(ticks) < 2:
+        return 0.0
+    return round((ticks[-1] - ticks[0]) / (5.0 * (len(ticks) - 1)), 2)
+
+
 def heartbeat_alive(s: Session, wait: float = 12) -> bool:
     """True when the server's Lua OnTick (which runs inside the world update) still advances."""
     offset = s.log_size()
@@ -241,24 +251,22 @@ def console_reply(s: Session, line: str, wait: float = 6) -> str:
 
 
 def admin_commands(s: Session) -> dict:
-    """Every /splint command against animals on the map, in a hutch, in a trailer and in an
-    inventory. Expected counts come from what this scenario places, not from Splint."""
+    """Every /splint command, with combined filters, against animals on the map, in a hutch,
+    in a trailer and in an inventory. Expected counts follow from what this scenario places."""
     x, y = fresh_spot(s, 240)
     out: dict = {}
     s.server("spawn hen - 20 6 0 3 30")
+    s.server("spawn chick - 5 -6 0 2 5")
     setup = s.lua(
-        f"local p=SplintLabServer.player() local px,py=math.floor(p:getX()),math.floor(p:getY()) "
-        # hutch with three chicks inside
+        "local p=SplintLabServer.player() local px,py=math.floor(p:getX()),math.floor(p:getY()) "
         "local def=HutchDefinitions.hutchs['hutchhen'] local sq=getCell():getGridSquare(px-6,py+6,0) "
         "local h=IsoHutch.new(sq,true,def.baseSprite,def,nil) h:transmitCompleteItemToClients() "
         "local cd=AnimalDefinitions.getDef('chick') local inside=0 "
         "for i=0,2 do local a=addAnimal(getCell(),0,0,0,'chick',cd:getRandomBreed()) "
         "a:getData():setPreferredHutchPosition(i) if h:addAnimalInside(a) then inside=inside+1 end end "
-        # livestock trailer with two animals
         "local tsq=getCell():getGridSquare(px+8,py-8,0) local v=addVehicleDebug('Base.Trailer_Livestock',IsoDirections.N,nil,tsq) "
         "local trailer=0 if v then for i=1,2 do local a=addAnimal(getCell(),px+8,py-8,0,'hen',AnimalDefinitions.getDef('hen'):getRandomBreed()) "
         "v:addAnimalInTrailer(a) trailer=trailer+1 end end "
-        # one chick carried in the player's inventory
         "local c=addAnimal(getCell(),0,0,0,'chick',cd:getRandomBreed()) local item=instanceItem('Base.Animal') "
         "item:setAnimal(c) p:getInventory():AddItem(item) "
         "return 'inside='..inside..' trailer='..trailer..' vehicle='..(v and v:getId() or -1)..' user='..p:getUsername()")
@@ -267,35 +275,42 @@ def admin_commands(s: Session) -> dict:
     user = re.search(r"user=(\S+)", setup).group(1)
     dup = s.lua(f"local t=SplintLabServer.animalsOnSquares({x},{y},0,20) local a,b for _,an in ipairs(t) do "
                 "if an:getAnimalType()=='hen' then if not a then a=an elseif not b then b=an end end end "
-                "b:setAnimalID(a:getAnimalID()) return a:getAnimalID()")
-    dup = dup.split()[-1]
-    out["duplicated_id"] = dup
+                "b:setAnimalID(a:getAnimalID()) return a:getAnimalID()").split()[-1]
     time.sleep(3)
-    r = 40
-    for name, cmd in [
-        ("status", "splint status"),
-        ("help", "splint help"),
-        ("census", f"splint animals census near {x} {y} {r}"),
-        ("find", f"splint animals find {dup}"),
-        ("fixids_dry", "splint animals fixids"),
-        ("fixids", "splint animals fixids confirm"),
-        ("census_after_fix", f"splint animals census near {x} {y} {r}"),
-        ("kill_hutch_dry", f"splint animals kill hutches cell {x // 256} {y // 256}"),
-        ("kill_hutch", f"splint animals kill hutches cell {x // 256} {y // 256} confirm"),
-        ("kill_trailer", f"splint animals kill trailer {vid} confirm"),
-        ("kill_inventory", f"splint animals kill inventory {user} confirm"),
-        ("kill_type_dry", f"splint animals kill near {x} {y} {r} hen"),
-        ("kill_type", f"splint animals kill near {x} {y} {r} hen confirm"),
-        ("census_final", f"splint animals census near {x} {y} {r}"),
-        ("ghosts", "splint animals kill ghosts"),
-        ("frozen", "splint animals frozen"),
-        ("bad_usage", "splint animals kill cell nope"),
-    ]:
-        out[name] = console_reply(s, cmd)
+    r, cx, cy = 40, x // 256, y // 256
+    near = f"near {x} {y} {r}"
+    steps = [
+        # (name, command, text that must appear in the reply)
+        ("status", "splint status", "15 of 15 patches applied, none missing"),
+        ("help", "splint help", "SELECTION terms combine"),
+        ("census", f"splint animals census {near}", "31 animals {WORLD=25, HUTCH=3, TRAILER=2, INVENTORY=1}, babies 9"),
+        ("census_dupes", f"splint animals census {near}", "duplicate-ID groups 1"),
+        ("players", "splint players", f"{user} at"),
+        ("find", f"splint animals find {dup}", "WARNING: 2 animals share this id"),
+        ("list_babies_world", f"splint animals list {near} stage baby in world", "5 animals"),
+        ("fixids_dry", f"splint animals fixids {near}", "Dry run: 1 selected animals"),
+        ("fixids", f"splint animals fixids {near} confirm", "Gave 1 animals fresh unique IDs"),
+        ("census_after_fix", f"splint animals census {near}", "duplicate-ID groups 0"),
+        ("kill_babies_not_hutch_dry", f"splint animals kill {near} type chicken stage baby except hutch", "would remove 5 animals"),
+        ("kill_hutch_babies", f"splint animals kill {near} type chicken stage baby in hutch confirm", "Removed 3 of 3"),
+        ("kill_world_chicks", f"splint animals kill {near} type chick confirm", "Removed 5 of 5"),
+        ("kill_inventory", f"splint animals kill inventory {user} confirm", "Removed 1 of 1"),
+        ("kill_trailer", f"splint animals kill trailer {vid} confirm", "Removed 2 of 2"),
+        ("kill_limit", f"splint animals kill cell {cx} {cy} type hen sex female limit 5 confirm", "Removed 5 of 5"),
+        ("census_final", f"splint animals census {near}", "15 animals {WORLD=15}"),
+        ("problems", "splint problems 5", "Animal problems handled since start"),
+        ("bad_usage", "splint animals kill cell nope", "Not a number"),
+        ("bad_term", "splint animals kill near 1 2 3 colour blue", "Unknown term 'colour'"),
+    ]
+    checks = {}
+    for name, cmd, expect in steps:
+        reply = console_reply(s, cmd)
+        out[name] = reply
+        checks[name] = expect in reply
+    out["checks"] = checks
+    out["all_checks_pass"] = all(checks.values())
     out["lua_alive"] = heartbeat_alive(s)
-    out["splint_errors"] = [l for l in s.log_since(0).splitlines() if "[Splint] ERROR" in l][:20]
     return out
-
 
 INVENTORY_ANIMALS = ("local p=SplintLabServer.player() local items=p:getInventory():getAllTypeRecurse('Animal') local out={} "
                      "for i=0,items:size()-1 do local a=items:get(i):getAnimal() "
@@ -398,28 +413,44 @@ def malformed_breed(s: Session) -> dict:
     return out
 
 
-def mass_growth_xl(s: Session) -> dict:
-    """2000 juveniles in a 41x41 square cross their growth age together. Vanilla's 0-9999 IDs
-    give about 2000*1999/2/10000 = 200 duplicate pairs at this size, many of them adjacent."""
-    x, y = fresh_spot(s, -360)
-    s.server("spawn chick - 1500 0 0 20 110", timeout=180)
-    s.server("spawn piglet - 300 0 0 20 130", timeout=120)
-    s.server("spawn lamb - 100 0 0 20 110", timeout=120)
-    s.server("spawn turkeypoult - 100 0 0 20 110", timeout=120)
-    before = census(s, x, y, 25)
+def stress(s: Session, total: int, spread: int, dx: int) -> dict:
+    """`total` farm juveniles packed around one spot cross their growth age together, while the
+    server's tick rate is measured before and after. Vanilla's 0-9999 IDs give about
+    total*(total-1)/2/10000 duplicate pairs at this size (200 at 2000, 1250 at 5000)."""
+    x, y = fresh_spot(s, dx)
+    base_tps = tick_rate(s)
+    mix = {"chick": 0.6, "piglet": 0.15, "lamb": 0.15, "turkeypoult": 0.1}
+    days = {"chick": 110, "piglet": 130, "lamb": 170, "turkeypoult": 110}
+    for kind, share in mix.items():
+        n = int(total * share)
+        while n > 0:
+            batch = min(n, 500)
+            s.server(f"spawn {kind} - {batch} 0 0 {spread} {days[kind]}", timeout=300)
+            n -= batch
+    before = census(s, x, y, spread + 3)
+    loaded_tps = tick_rate(s)
     off = s.log_size()
-    grown = force_growth(s, x, y, 25)
-    time.sleep(40)
-    after = census(s, x, y, 25)
+    grown = s.lua(force_growth_code(x, y, spread + 3), timeout=300)
+    time.sleep(60)
+    after = census(s, x, y, spread + 3)
     return {"before": before, "forced": grown, "after": after, "lost": count(before) - count(after),
+            "tps_empty": base_tps, "tps_with_animals": loaded_tps, "tps_after_growth": tick_rate(s),
             "exceptions": exceptions(s.log_since(off)), "lua_alive": heartbeat_alive(s)}
+
+
+def stress_2000(s: Session) -> dict:
+    return stress(s, 2000, 22, -360)
+
+
+def stress_5000(s: Session) -> dict:
+    return stress(s, 5000, 35, -720)
 
 
 SCENARIOS = {f.__name__.replace("_", "-"): f for f in
              (mass_growth, duplicate_ids, invalid_type, water_seed, grow_near_ghost, grow_near_invalid_ghost,
               malformed_breed, unload_with_ghost)}
 # Needs the agent; run with --only admin-commands.
-EXTRA = {"admin-commands": admin_commands, "mass-growth-xl": mass_growth_xl}
+EXTRA = {"admin-commands": admin_commands, "stress-2000": stress_2000, "stress-5000": stress_5000}
 # Storage-place growth investigations.
 EXTRA.update({f.__name__.replace('_', '-'): f for f in (inventory_growth, trailer_growth, hutch_growth)})
 
@@ -458,11 +489,28 @@ def main() -> None:
     r.add_argument("--agent")
     r.add_argument("--only", nargs="*")
     r.add_argument("--shared", action="store_true", help="run all chosen scenarios in one session")
+    rp = sub.add_parser("repro", help="set up one scenario and leave the session running for inspection")
+    rp.add_argument("name", choices=sorted({**SCENARIOS, **EXTRA}))
+    rp.add_argument("evidence")
+    rp.add_argument("--agent")
     a = p.parse_args()
+    if a.cmd == "repro":
+        evidence = Path(a.evidence).resolve()
+        s = start(evidence, a.agent)
+        result = {**SCENARIOS, **EXTRA}[a.name](s)
+        print(json.dumps(result, indent=2))
+        lab = LAB / "splintlab.py"
+        print(f"\nSession left running: {evidence}\n"
+              f"  server console:  python3 {lab} console {evidence} splint status\n"
+              f"  server Lua:      python3 {lab} server {evidence} census\n"
+              f"  logs:            {evidence}/server-cache/server-console.txt, {evidence}/server-cache/Logs/\n"
+              f"  stop:            python3 {lab} stop {evidence}")
+        return
     root = Path(a.root).resolve()
     root.mkdir(parents=True, exist_ok=True)
-    chosen = [(n, f) for n, f in {**SCENARIOS, **EXTRA}.items()
-              if (a.only and n in a.only) or (not a.only and n not in EXTRA)]
+    every = {**SCENARIOS, **EXTRA}
+    # --only keeps the given order, so a scenario that wrecks vanilla can run last in --shared.
+    chosen = [(n, every[n]) for n in a.only] if a.only else list(SCENARIOS.items())
     results: dict = {}
 
     def record(name: str, fn, s: Session) -> None:

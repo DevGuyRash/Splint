@@ -50,8 +50,9 @@ public final class AnimalOps {
      * the duplicate check) and every system that touches them throws.
      */
     public static boolean isGhost(IsoAnimal a) {
-        return a.getAdef() == null || a.getData() == null || a.getAnimalType() == null
-                || AnimalDefinitions.getDef(a.getAnimalType()) == null;
+        // Called for every animal on every update: field reads only (init sets adef from the
+        // type's definition, so a non-null adef already implies a known type).
+        return a.getAdef() == null || a.getData() == null || a.getAnimalType() == null;
     }
 
     public static String describe(IsoAnimal a) {
@@ -84,10 +85,35 @@ public final class AnimalOps {
             IsoPlayer near = nearestPlayer(a.getX(), a.getY());
             if (near != null) b.append(" nearestPlayer=").append(near.getUsername()).append(" dist=")
                     .append((int) Math.hypot(near.getX() - a.getX(), near.getY() - a.getY()));
+            List<String> inCell = playersInCell(Math.floorDiv(x, CELL), Math.floorDiv(y, CELL));
+            b.append(" playersInCell=").append(inCell.isEmpty() ? "none" : String.join(",", inCell));
         } catch (Throwable t) {
             b.append(" <describe failed: ").append(t).append('>');
         }
         return b.toString();
+    }
+
+    /** "chick#10421" (or "GHOST" for an uninitialised animal): short enough for lists. */
+    public static String brief(IsoAnimal a) {
+        return (isGhost(a) ? "GHOST" : a.getAnimalType()) + "#" + a.getAnimalID();
+    }
+
+    /** Online players standing in map cell (cx, cy). */
+    public static List<String> playersInCell(int cx, int cy) {
+        List<String> out = new ArrayList<>();
+        for (IsoPlayer p : players()) {
+            if (Math.floorDiv((int) p.getX(), CELL) == cx && Math.floorDiv((int) p.getY(), CELL) == cy) out.add(p.getUsername());
+        }
+        return out;
+    }
+
+    /** Whether the animal is a juvenile that will still grow (vanilla isBaby, safe on ghosts). */
+    public static boolean isJuvenile(IsoAnimal a) {
+        try {
+            return a.getData() != null && a.getData().currentStage != null && a.isBaby();
+        } catch (Throwable t) {
+            return false;
+        }
     }
 
     public static IsoPlayer nearestPlayer(float x, float y) {
@@ -276,6 +302,7 @@ public final class AnimalOps {
                 if (item instanceof AnimalInventoryItem ai && ai.getAnimal() == a) removeCarried(ai);
             }
         });
+        Incidents.record("ghost removed (" + where + ")", a);
         detach(a);
         Stats.ghostsRemoved.incrementAndGet();
         Log.problem("ghost-removed:" + where, "removed uninitialised animal (" + where + "): " + what, null);

@@ -7,7 +7,6 @@ import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import splint.core.Log;
 import zombie.characters.animals.IsoAnimal;
-import zombie.characters.animals.datas.AnimalBreed;
 import zombie.iso.IsoCell;
 import zombie.iso.IsoChunk;
 import zombie.iso.IsoGridSquare;
@@ -24,7 +23,6 @@ public final class AnimalHooks {
     // Each original is resolved in its own holder class, which the JVM initialises on the
     // first call of that hook only. A hook runs only if its own patch applied, so a patch that
     // failed to apply (e.g. after a game update) cannot break the others.
-    private static final class Init { static final MethodHandle H = original(IsoAnimal.class, "init", void.class, AnimalBreed.class); }
     private static final class Load { static final MethodHandle H = original(IsoAnimal.class, "load", void.class, ByteBuffer.class, int.class, boolean.class); }
     private static final class Update { static final MethodHandle H = original(IsoAnimal.class, "update", void.class); }
     private static final class Sounds { static final MethodHandle H = original(IsoAnimal.class, "updateLoopingSounds", void.class); }
@@ -39,29 +37,19 @@ public final class AnimalHooks {
     private static final class SaveReal { static final MethodHandle H = original("zombie.characters.animals.AnimalManagerMain",
             "saveRealAnimals", void.class); }
 
-    /** Set while IsoAnimal.load runs: load calls init, then overwrites the ID with the saved one. */
-    private static final ThreadLocal<Boolean> LOADING = ThreadLocal.withInitial(() -> false);
 
     private AnimalHooks() {}
 
     // --- identity ---------------------------------------------------------------------------
 
-    /** init(breed) gives the animal a random 0-9999 ID; replace it with a unique one. */
-    public static void init(IsoAnimal self, AnimalBreed breed) throws Throwable {
-        Init.H.invokeExact(self, breed);
-        if (self.getAdef() == null) return;          // unknown type: no ID; handled as a ghost
-        if (LOADING.get()) return;                   // load() sets the saved ID right after
-        self.setAnimalID(AnimalIds.allocate());
-    }
-
     /** Animals read from a save keep their ID; the counter moves past it. */
     public static void load(IsoAnimal self, ByteBuffer input, int worldVersion, boolean isDebugSave) throws Throwable {
-        boolean outer = !LOADING.get();
-        LOADING.set(true);
+        boolean outer = !AnimalIds.isLoading();
+        AnimalIds.loading(true);
         try {
             Load.H.invokeExact(self, input, worldVersion, isDebugSave);
         } finally {
-            if (outer) LOADING.set(false);
+            if (outer) AnimalIds.loading(false);
         }
         AnimalIds.observe(self.getAnimalID());
     }
@@ -103,6 +91,7 @@ public final class AnimalHooks {
                         // A second object for the same animal (vanilla's "chickenpocalypse"
                         // case): remove the stray copy, keep the animal that is being updated.
                         String copy = AnimalOps.describe(other);
+                        Incidents.record("duplicate copy removed", other);
                         AnimalOps.detach(other);
                         Stats.duplicateCopiesRemoved.incrementAndGet();
                         Log.problem("duplicate-copy", "removed a second object of the same animal (shared data/genome): "
@@ -114,6 +103,7 @@ public final class AnimalHooks {
                     int fresh = AnimalIds.allocate();
                     target.setAnimalID(fresh);
                     Stats.duplicateIdsFixed.incrementAndGet();
+                    Incidents.record("duplicate id " + old + " re-assigned", target);
                     Log.problem("duplicate-id", "duplicate animal id " + old + " within 4 squares (vanilla deletes "
                             + (replacing != null ? "both the growing animal and its next stage" : "the new animal")
                             + "); kept both, new id " + fresh + " for " + AnimalOps.describe(target)
@@ -156,6 +146,7 @@ public final class AnimalHooks {
             self.setCurrent(land);
             self.setMovingSquareNow();
             Stats.waterRelocations.incrementAndGet();
+            Incidents.record("moved off water", self);
             Log.problem("water-relocation", "animal " + (constructing ? "created" : "growing") + " on water at " + from
                     + " moved to land " + land.getX() + "," + land.getY() + "," + land.getZ()
                     + " (vanilla leaves an uninitialised animal that stops the world update)", null);
@@ -163,6 +154,7 @@ public final class AnimalHooks {
         }
         if (constructing) {
             Stats.ghostsPrevented.incrementAndGet();
+            Incidents.record("created on water, no land near", self);
             Log.problem("water-no-land", "animal created on water at " + sq.getX() + "," + sq.getY() + "," + sq.getZ()
                     + " with no land within 8 squares; initialising it there instead of leaving it half-built", null);
             return false;
@@ -226,6 +218,8 @@ public final class AnimalHooks {
             throw e;
         } catch (Throwable t) {
             Stats.hutchFailures.incrementAndGet();
+            Incidents.record("hutch update failed: " + t.getClass().getSimpleName(), self.savedX, self.savedY, self.savedZ,
+                    "hutch(" + self.getAnimalInside().size() + " inside)");
             Log.problem("hutch-update:" + t.getClass().getName() + ":" + t.getMessage(), "hutch at " + self.savedX + ","
                     + self.savedY + "," + self.savedZ + " cell=" + Math.floorDiv(self.savedX, AnimalOps.CELL) + ","
                     + Math.floorDiv(self.savedY, AnimalOps.CELL) + " (" + self.getAnimalInside().size()
@@ -246,6 +240,7 @@ public final class AnimalHooks {
             throw e;
         } catch (Throwable t) {
             Stats.removalFailures.incrementAndGet();
+            Incidents.record("removal failed, completed", self);
             Log.problem("removeFromWorld:" + t.getClass().getName(), "removing animal from the world threw; finished the removal: "
                     + AnimalOps.describe(self), t);
             AnimalOps.detach(self);
@@ -259,6 +254,7 @@ public final class AnimalHooks {
             throw e;
         } catch (Throwable t) {
             Stats.removalFailures.incrementAndGet();
+            Incidents.record("delete failed, completed", self);
             Log.problem("delete:" + t.getClass().getName(), "deleting animal threw; finished the removal: "
                     + AnimalOps.describe(self), t);
             AnimalOps.detach(self);
