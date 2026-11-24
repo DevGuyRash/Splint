@@ -1096,6 +1096,90 @@ def trailer_egg_compartment(s: Session) -> dict:
     return out
 
 
+SQUARE_GHOST = ("local d=AnimalDefinitions.getDef('hen') local a=addAnimal(getCell(),%d,%d,0,'splintNoSuchAnimal',d:getRandomBreed()) "
+                "pcall(function() a:removeFromWorld() end) "
+                "return 'data='..tostring(a:getData())..' inUpdateList='..tostring(getCell():getObjectListForLua():contains(a))")
+HEAP_CLASSES = ("zombie.network.ServerMap$ServerCell", "zombie.iso.IsoChunk", "zombie.network.ServerChunkLoader$")
+
+
+def server_objects(s: Session) -> dict[str, int]:
+    """Live map cells, chunks and save jobs in the server's heap (jcmd, so it works on vanilla)."""
+    pid = json.loads((s.evidence / "session.json").read_text())["server_pid"]
+    text = subprocess.run(["jcmd", str(pid), "GC.class_histogram"], capture_output=True, text=True, timeout=120).stdout
+    out: dict[str, int] = {}
+    for m in re.finditer(r"^ *\d+: +(\d+) +\d+ +(\S+)", text, re.M):
+        name = m.group(2)
+        if name in HEAP_CLASSES[:2] or name.startswith(HEAP_CLASSES[2]):
+            out[name.rsplit(".", 1)[1]] = int(m.group(1))
+    total = re.search(r"^Total +\d+ +(\d+)", text, re.M)
+    if total:
+        out["heap_mb"] = int(total.group(1)) // 2**20
+    return out
+
+
+# Chunks of the 64x64-square server cell holding (x, y) that the server has in memory, of 64.
+CELL_CHUNKS = ("local bx,by=math.floor(%d/64)*64,math.floor(%d/64)*64 local n=0 for i=0,7 do for j=0,7 do "
+               "if getCell():getGridSquare(bx+i*8+4,by+j*8+4,0) then n=n+1 end end end return n")
+MARK = "local sq=getCell():getGridSquare(%d,%d,0) if not sq then return 'no square' end sq:AddWorldInventoryItem('Base.Axe',0.5,0.5,0) return 'placed'"
+MARKED = ("local sq=getCell():getGridSquare(%d,%d,0) if not sq then return 'no square' end local n=0 local l=sq:getWorldObjects() "
+          "for i=0,l:size()-1 do if l:get(i):getItem():getFullType()=='Base.Axe' then n=n+1 end end return n")
+
+
+def presence_cycle(s: Session, ghost: bool = True) -> dict:
+    """A player arrives at and leaves a ghost's area twice, travelling on in between. The ghost is
+    the kind finding 5 leaves behind: on its square but out of the update list. Made with a type
+    that has no definition, on land, so that Splint does not prevent it and its removal at chunk
+    unload is what gets tested. `ghost=False` is the same trip without one. Moving by teleport
+    stands in for other players staying online while one leaves. Axes dropped in chunks that
+    unload before, with and after the ghost's show what a failed unload loses. The clock runs four
+    times as fast, so hunger and thirst visibly move (or do not) in a short window; no god mode,
+    which would stop them."""
+    s.tp(*LAKE_SHORE, settle=20)
+    set_time(s, 60, 4)
+    gx, gy = LAKE_SHORE[0] - 2, LAKE_SHORE[1]
+    bx, by = gx // 64 * 64, gy // 64 * 64
+    cx, cy = gx // 8 * 8, gy // 8 * 8
+    marks = {"earlier_chunk": (bx + 12, by + 12), "ghost_chunk_before": (cx, cy), "ghost_chunk_after": (cx + 7, cy + 7),
+             "later_chunk": (cx + 4, cy + 12)}
+    hole = marks["earlier_chunk"]
+    out: dict = {"marks": {n: s.lua(MARK % xy) for n, xy in marks.items()},
+                 "made": s.lua(SQUARE_GHOST % (gx, gy)) if ghost else "no ghost",
+                 "census": census(s, gx, gy, 6)}
+
+    def phase(name: str, stops: list[tuple[int, int]], each: float) -> None:
+        off = s.log_size()
+        for xy in stops:
+            s.tp(*xy, settle=each)
+        first = s.client("status")
+        time.sleep(20)
+        last = s.client("status")
+        text = s.log_since(off)
+        beats = [(int(f), int(st.replace(",", ""))) for f, st in
+                 re.findall(r"f:(\d+) st:([\d,]+)> \[SPLAB-S\] HB", text)]
+        gaps = [b[1] - a[1] for a, b in zip(beats, beats[1:])]
+        out[name] = {"exceptions": exceptions(text), "log_kb": round(len(text) / 1024, 1),
+                     "ticks_per_s": round((beats[-1][0] - beats[0][0]) * 1000 / (beats[-1][1] - beats[0][1]), 2) if len(beats) > 1 else 0,
+                     "longest_heartbeat_gap_s": round(max(gaps, default=0) / 1000, 1),
+                     "client_first": first, "client_after_20s": last,
+                     "server_player": s.lua("local p=SplintLabServer.player() return math.floor(p:getX())..','..math.floor(p:getY())"
+                                            "..' square='..tostring(p:getCurrentSquare()~=nil)"),
+                     "ghost_cell_chunks": s.lua(CELL_CHUNKS % (gx, gy)), "objects": server_objects(s)}
+        if stops[-1] == LAKE_SHORE or stops[-1] == hole:
+            out[name]["census"] = census(s, gx, gy, 6)
+            out[name]["axes"] = {n: s.lua(MARKED % xy) for n, xy in marks.items()}
+        # A long scenario: what was measured so far survives a session that dies later.
+        (s.evidence / "partial.json").write_text(json.dumps(out, indent=2) + "\n")
+
+    phase("present_1", [LAKE_SHORE], 12)
+    phase("away_1", [SPAWN], 15)
+    phase("away_travel", [(SPAWN[0] + dx, SPAWN[1]) for dx in (-400, -800, -1200, -1600)], 10)
+    phase("present_2", [LAKE_SHORE], 12)
+    phase("present_2_earlier_chunk", [hole], 8)
+    phase("away_2", [SPAWN], 15)
+    phase("present_3", [LAKE_SHORE], 12)
+    return out
+
+
 def ovo_farms(s: Session) -> dict:
     """'Loading OvO Farms and leaving it': the player visits Ovo Farms (its ranch animals spawn on
     first load), leaves so the farm unloads while in-game days pass, and comes back, twice. The
@@ -1491,6 +1575,8 @@ EXTRA["pasture-pond-unfenced"] = lambda s: pasture_pond(s, fence=False)
 EXTRA["drop-on-water"] = drop_on_water
 EXTRA["trailer-unload-dead"] = trailer_unload_dead
 EXTRA["trailer-egg-compartment"] = trailer_egg_compartment
+EXTRA["presence-cycle"] = presence_cycle
+EXTRA["presence-cycle-control"] = lambda s: presence_cycle(s, ghost=False)
 
 
 def start(evidence: Path, agent: str | None, resume: Path | None = None) -> Session:

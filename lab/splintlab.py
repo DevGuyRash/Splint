@@ -199,7 +199,8 @@ def cmd_start(args: argparse.Namespace) -> None:
 
     vm = ["-Xms512m", f"-Xmx{args.server_heap}", "-XX:+UseZGC", "--enable-native-access=ALL-UNNAMED",
           "--add-exports=java.base/jdk.internal.misc=ALL-UNNAMED", "-Djava.awt.headless=true",
-          "-Dzomboid.steam=0", "-Djava.library.path=linux64/:./", "-XX:-OmitStackTraceInFastThrow"]
+          "-Dzomboid.steam=0", "-Djava.library.path=linux64/:./", "-XX:-OmitStackTraceInFastThrow",
+          *os.environ.get("SPLINT_SERVER_JVM", "").split()]   # for example -Dsplint.disable=animals
     if args.agent:
         # Run from a private copy: rebuilding dist/ must not change a jar a live JVM reads lazily.
         agent_copy = evidence / "splint-agent.jar"
