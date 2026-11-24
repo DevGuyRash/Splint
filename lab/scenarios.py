@@ -860,6 +860,242 @@ def trailer_unload_water(s: Session) -> dict:
     return out
 
 
+# A chick carried the way the game carries one: built on the player's square, wrapped in an
+# Animal item, taken out of the world. SplintLabServer.chicks keeps the items by animal ID.
+POCKET_CHICK = ("local function pocketChick(p) local cd=AnimalDefinitions.getDef('chick') "
+                "local c=addAnimal(getCell(),math.floor(p:getX()),math.floor(p:getY()),0,'chick',cd:getRandomBreed()) c:addToWorld() "
+                "local item=instanceItem('Base.Animal') item:setAnimal(c) c:removeFromWorld() c:removeFromSquare() "
+                "p:getInventory():AddItem(item) SplintLabServer.chicks=SplintLabServer.chicks or {} "
+                "SplintLabServer.chicks[c:getAnimalID()]=item return c:getAnimalID() end ")
+# Every animal in the update list with this ID, with what the drop or unload made of it.
+DESCRIBE_ID = ("local function describe(id) local l=getCell():getObjectListForLua() local out={} for i=0,l:size()-1 do "
+               "local o=l:get(i) if instanceof(o,'IsoAnimal') and o:getAnimalID()==id then local sq=o:getCurrentSquare() "
+               "out[#out+1]='type='..tostring(o:getAnimalType())..' data='..tostring(o:getData()~=nil)"
+               "..' at='..math.floor(o:getX())..','..math.floor(o:getY())..' water='..tostring(sq~=nil and sq:isWaterSquare())"
+               "..' health='..string.format('%.2f',o:getHealth())..' dead='..tostring(o:isDead()) end end "
+               "return id..': '..(#out==0 and 'not in the update list' or table.concat(out,'; ')) end ")
+# ISInventoryTransferAction:getNotFullFloorSquare and canDropOnFloor (stairs left out: there are
+# none here), with the floor container's 50 weight capacity: the square a dropped item lands on.
+DROP_SQUARE = ("local function canDrop(p,sq) if not sq or not sq:TreatAsSolidFloor() or sq:isSolid() or sq:isSolidTrans() then return false end "
+               "local cur=p:getCurrentSquare() if cur and sq~=cur and (cur:isBlockedTo(sq) or cur:isWindowTo(sq)) then return false end return true end "
+               "local function room(sq,item) local w=sq:getTotalWeightOfItemsOnFloor() if w>=50 then return false end "
+               "return w+item:getUnequippedWeight()<=50 or item:getUnequippedWeight()>=50 end "
+               "local function dropSquare(p,item) local sq=p:getCurrentSquare() if canDrop(p,sq) and room(sq,item) then return sq end "
+               "for dy=-1,1 do for dx=-1,1 do if dx~=0 or dy~=0 then local s=getCell():getGridSquare(math.floor(p:getX())+dx,math.floor(p:getY())+dy,math.floor(p:getZ())) "
+               "if canDrop(p,s) and room(s,item) then return s end end end end end ")
+
+
+def drop_on_water(s: Session) -> dict:
+    """Dropping a carried animal builds it anew on the drop square (IsoGridSquare.
+    AddWorldInventoryItem: new IsoAnimal at the square, then copyFrom), the same pattern that makes
+    ghosts when a trailer unloads onto water. Can a drop land on water? On foot the item goes on the
+    player's own square, or the first free neighbour when that one is full; from a vehicle seat it
+    goes on the door's square (ISDropVehicleItemAction), with no water check."""
+    shore = (LAKE_SHORE[0] + 3, LAKE_SHORE[1])        # last land column; water starts one square east
+    s.tp(*shore)
+    pre = DROP_SQUARE + POCKET_CHICK + DESCRIBE_ID + "local p=SplintLabServer.player() "
+    out: dict = {"player_at": here(s)}
+    out["squares_around_player"] = s.lua(
+        pre + "local out={} for dy=-1,1 do for dx=-1,1 do local sq=getCell():getGridSquare(math.floor(p:getX())+dx,math.floor(p:getY())+dy,0) "
+        "out[#out+1]=dx..','..dy..(sq:isWaterSquare() and ' water' or ' land')..(canDrop(p,sq) and ' droppable' or ' not-droppable') end end "
+        "return table.concat(out,' | ')")
+    off = s.log_size()
+
+    # 1. An ordinary drop on foot at the water's edge.
+    on_foot = s.lua(pre + "local id=pocketChick(p) local item=SplintLabServer.chicks[id] local sq=dropSquare(p,item) "
+                    "p:getInventory():Remove(item) sq:AddWorldInventoryItem(item,0.5,0.5,0) "
+                    "return 'dropped on '..sq:getX()..','..sq:getY()..(sq:isWaterSquare() and ' (water)' or ' (land)')..'; '..describe(id)")
+    time.sleep(10)
+    out["on_foot"] = {"drop": on_foot, "lua_alive": heartbeat_alive(s)}
+
+    # 2. The player's square and its land neighbours are full: does the drop fall back to water?
+    if out["on_foot"]["lua_alive"]:
+        full = s.lua(pre + "local id=pocketChick(p) local item=SplintLabServer.chicks[id] local filled=0 "
+                     "for i=1,9 do local sq=dropSquare(p,item) if not sq or sq:isWaterSquare() then break end "
+                     "while sq:getTotalWeightOfItemsOnFloor()<50 do sq:AddWorldInventoryItem('Base.Log',0.5,0.5,0) end filled=filled+1 end "
+                     "local sq=dropSquare(p,item) if not sq then return 'no square to drop on after filling '..filled..' land squares' end "
+                     "p:getInventory():Remove(item) sq:AddWorldInventoryItem(item,0.5,0.5,0) "
+                     "return 'filled '..filled..' land squares; dropped on '..sq:getX()..','..sq:getY()..(sq:isWaterSquare() and ' (water)' or ' (land)')..'; '..describe(id)")
+        time.sleep(10)
+        out["on_foot_land_full"] = {"drop": full, "lua_alive": heartbeat_alive(s)}
+
+    # 3. From the seat of a car parked at the water's edge: the item goes on the door's square.
+    if out.get("on_foot_land_full", out["on_foot"])["lua_alive"]:
+        # A car side-on to the shore, facing N one or two squares back from the first water square
+        # of its row, so its right-hand doors open over the water; door squares are measured after
+        # a tick, as for trailers.
+        s.lua("SplintLabServer.cars={} "
+              f"for _,dy in ipairs({{-14,-8,8,14,20,-20}}) do local y={shore[1]}+dy local wx=nil "
+              f"for x={shore[0]}-6,{shore[0]}+12 do local sq=getCell():getGridSquare(x,y,0) if sq and sq:isWaterSquare() then wx=x break end end "
+              "if wx then for _,dx in ipairs({-2,-1}) do local sq=getCell():getGridSquare(wx+dx,y,0) "
+              "if sq and not sq:isWaterSquare() then local v=addVehicleDebug('Base.CarNormal',IsoDirections.N,nil,sq) "
+              "if v then table.insert(SplintLabServer.cars,{v=v,dir='N'}) end end end end end return #SplintLabServer.cars")
+        time.sleep(5)
+        placed = s.lua(
+            "local out,keep,area=({}),nil,nil for _,c in ipairs(SplintLabServer.cars) do local v=c.v local vsq=v:getSquare() "
+            "for seat=0,v:getMaxPassengers()-1 do local part=v:getPassengerDoor(seat) if part and part:getArea() then "
+            "local dsq=v:getSquareForArea(part:getArea()) local water=dsq and dsq:isWaterSquare() "
+            "out[#out+1]=c.dir..' '..part:getId()..'->'..(dsq and (dsq:getX()..','..dsq:getY()) or 'nil')..(water and ' WATER' or '') "
+            "if water and vsq and not vsq:isWaterSquare() and not keep then keep=v area=part:getArea() end "
+            "else out[#out+1]=c.dir..' seat'..seat..' no door area' end end end "
+            "for _,c in ipairs(SplintLabServer.cars) do if c.v~=keep then c.v:permanentlyRemove() end end "
+            "SplintLabServer.car=keep SplintLabServer.carArea=area "
+            "return (keep and 'door over water; ' or 'none; ')..#SplintLabServer.cars..' cars: '..table.concat(out,' | ')")
+        seat: dict = {"placed": placed}
+        if "door over water" in placed:
+            seat["drop"] = s.lua(pre + "local id=pocketChick(p) local item=SplintLabServer.chicks[id] "
+                                 "local sq=SplintLabServer.car:getSquareForArea(SplintLabServer.carArea) "
+                                 "p:getInventory():Remove(item) sq:AddWorldInventoryItem(item,0,0,0,true) "
+                                 "return 'dropped on '..sq:getX()..','..sq:getY()..(sq:isWaterSquare() and ' (water)' or ' (land)')..'; '..describe(id)")
+            time.sleep(10)
+        seat["lua_alive"] = heartbeat_alive(s)
+        seat["stats_frozen"] = stats_frozen(s)
+        out["from_car_seat"] = seat
+    if heartbeat_alive(s, wait=5):
+        out["ghosts_in_update_list"] = s.lua(LIST_GHOSTS).split()[-1]
+        out["census"] = census(s, shore[0], shore[1], 20)
+    out["exceptions"] = exceptions(s.log_since(off))
+    return out
+
+
+def trailer_unload_dead(s: Session) -> dict:
+    """The player who started the incident unloaded a trailer of dead hens and chicks on land: one
+    chick 'said it was alive' but came out dead, another gave 'a blood animation without any body'.
+    removeAnimalFromTrailer builds every animal anew at the trailer's entry, and when the old one is
+    dead (it tests the old one) makes a corpse from the new one. Unloaded here the game's way
+    (ISRemoveAnimalFromTrailer:complete): healthy, dying and dead animals, one grabbed into the
+    pocket and dropped on land."""
+    x, y = fresh_spot(s, -360)
+    # addVehicleDebug can return a trailer the cell never takes in (seen on one spot near spawn):
+    # its entry point is then the bare script offset near 0,0, which no player's trailer has. A new
+    # vehicle joins the cell a moment later, so each spot is checked after a pause.
+    for dx, dy in ((8, -8), (-8, -8), (8, 8), (-8, 8), (14, 0), (-14, 0)):
+        s.lua(f"local tsq=getCell():getGridSquare({x}+{dx},{y}+{dy},0) "
+              "SplintLabServer.dt=tsq and addVehicleDebug('Base.Trailer_Livestock',IsoDirections.N,nil,tsq) return 1")
+        time.sleep(5)
+        if s.lua("local v=SplintLabServer.dt if v and getCell():getVehicles():contains(v) then return 'held=yes' end "
+                 "if v then v:permanentlyRemove() end SplintLabServer.dt=nil return 'held=no'").endswith("held=yes"):
+            break
+    made = s.lua("local v=SplintLabServer.dt if not v then return 'no trailer the world holds' end "
+                 "SplintLabServer.dt=v local cd,hd=AnimalDefinitions.getDef('chick'),AnimalDefinitions.getDef('hen') "
+                 "local plan={{'hen','dead'},{'hen','dead'},{'hen','dead'},{'chick','dead'},{'chick','dying'},{'chick','healthy'},{'chick','grab'}} "
+                 "SplintLabServer.plan={} for _,e in ipairs(plan) do local def=e[1]=='hen' and hd or cd "
+                 "local a=addAnimal(getCell(),v:getSquare():getX(),v:getSquare():getY(),0,e[1],def:getRandomBreed()) v:addAnimalInTrailer(a) "
+                 "SplintLabServer.plan[a:getAnimalID()]=e[2] "
+                 "if e[2]=='dead' then a:setHealth(0) elseif e[2]=='dying' then a:setHealth(0.02) end end "
+                 "return v:getAnimals():size()")
+    time.sleep(20)       # let the trailer's own update see them
+    before = s.lua("local v=SplintLabServer.dt local out={} for i=0,v:getAnimals():size()-1 do local a=v:getAnimals():get(i) "
+                   "out[#out+1]=SplintLabServer.plan[a:getAnimalID()]..' '..tostring(a:getAnimalType())..'#'..a:getAnimalID()"
+                   "..' health='..string.format('%.2f',a:getHealth())..' dead='..tostring(a:isDead()) end return table.concat(out,'; ')")
+    trailer_at_unload = s.lua("local v=SplintLabServer.dt local e=v:getAreaCenter('AnimalEntry') local sq=v:getSquare() "
+                              "return 'trailer '..string.format('%.1f,%.1f',v:getX(),v:getY())..' square='..(sq and (sq:getX()..','..sq:getY()) or 'nil')"
+                              "..' entry '..string.format('%.1f,%.1f',e:getX(),e:getY())..' in cell='..tostring(getCell():getVehicles():contains(v))")
+    off = s.log_size()
+    unloaded = s.lua(
+        DESCRIBE_ID + "local v=SplintLabServer.dt local p=SplintLabServer.player() local out={} "
+        "while v:getAnimals():size()>0 do local a=v:getAnimals():get(0) local id=a:getAnimalID() local kind=SplintLabServer.plan[id] "
+        "local n=v:removeAnimalFromTrailer(a) local what=n and (instanceof(n,'IsoAnimal') and 'animal' or instanceof(n,'IsoDeadBody') and 'corpse' or tostring(n)) or 'nil' "
+        "if kind=='grab' and instanceof(n,'IsoAnimal') then local item=instanceItem('Base.Animal') item:setAnimal(n) p:getInventory():AddItem(item) "
+        "n:removeFromWorld() n:removeFromSquare() n:setSquare(nil) SplintLabServer.grabbed=item SplintLabServer.grabbedId=id "
+        "elseif instanceof(n,'IsoAnimal') then n:addToWorld() end "
+        "out[#out+1]=kind..' -> '..what..' | '..describe(id) end return table.concat(out,' || ')", timeout=90)
+    time.sleep(10)
+    dropped = s.lua(DROP_SQUARE + DESCRIBE_ID + "local p=SplintLabServer.player() local item=SplintLabServer.grabbed "
+                    "if not item then return 'nothing grabbed' end local sq=dropSquare(p,item) p:getInventory():Remove(item) "
+                    "sq:AddWorldInventoryItem(item,0.5,0.5,0) return 'dropped on '..sq:getX()..','..sq:getY()"
+                    "..(sq:isWaterSquare() and ' (water)' or ' (land)')..'; '..describe(SplintLabServer.grabbedId)")
+    corpses = ("local v=SplintLabServer.dt local out={} for dx=-15,15 do for dy=-15,15 do local sq=getCell():getGridSquare(v:getSquare():getX()+dx,v:getSquare():getY()+dy,0) "
+               "if sq then local b=sq:getDeadBodys() for i=0,b:size()-1 do if b:get(i):isAnimal() then "
+               "out[#out+1]=sq:getX()..','..sq:getY() end end end end end return #out..' '..table.concat(out,';')")
+    time.sleep(20)
+    out = {"made": made, "in_trailer": before, "trailer_at_unload": trailer_at_unload, "unloaded": unloaded, "grabbed_and_dropped": dropped,
+           "lua_alive": heartbeat_alive(s), "stats_frozen": stats_frozen(s)}
+    if out["lua_alive"]:
+        out.update(animal_corpses=s.lua(corpses), ghosts_in_update_list=s.lua(LIST_GHOSTS).split()[-1],
+                   census=census(s, x, y, 25),
+                   every_unloaded_id=s.lua(DESCRIBE_ID + "local out={} for id,_ in pairs(SplintLabServer.plan) do "
+                                           "out[#out+1]=SplintLabServer.plan[id]..' '..describe(id) end return table.concat(out,' || ')"))
+        clock = wait_game_hours(s, 12)       # the dying chick has had time to die
+        later: dict = {"lua_alive": heartbeat_alive(s)}
+        if later["lua_alive"]:
+            later.update(clock=clock, animal_corpses=s.lua(corpses), ghosts_in_update_list=s.lua(LIST_GHOSTS).split()[-1],
+                         every_unloaded_id=s.lua(DESCRIBE_ID + "local out={} for id,_ in pairs(SplintLabServer.plan) do "
+                                                 "out[#out+1]=SplintLabServer.plan[id]..' '..describe(id) end return table.concat(out,' || ')"))
+        out["twelve_hours_later"] = later
+    out["exceptions"] = exceptions(s.log_since(off))
+    return out
+
+
+# The chicks in the trailer's egg compartment, the way Food.checkEggHatch leaves them: Animal
+# items in that container. What the game thinks of each one.
+EGG_CHICKS = ("local function eggChicks() local c=SplintLabServer.et:getPartById('TrailerAnimalEggs'):getItemContainer() "
+              "local out={} for i=0,c:getItems():size()-1 do local it=c:getItems():get(i) local a=instanceof(it,'AnimalInventoryItem') and it:getAnimal() "
+              "if a then out[#out+1]=tostring(a:getAnimalType())..'#'..a:getAnimalID()..' age='..a:getData():getAge()"
+              "..' health='..string.format('%.2f',a:getHealth())..' hunger='..string.format('%.2f',a:getHunger())"
+              "..' thirst='..string.format('%.2f',a:getThirst())..' dead='..tostring(a:isDead()) "
+              "else out[#out+1]=it:getFullType() end end return #out..' '..table.concat(out,'; ') end ")
+
+
+def trailer_egg_compartment(s: Session) -> dict:
+    """'Baby chickens that hatched into the egg compartment' of a livestock trailer that had been
+    abandoned a long time; taken out, one 'said it was alive, but it plopped onto the ground dead'.
+    Food.checkEggHatch builds a chick hatching in a trailer container at the trailer's square, then
+    wraps it in an Animal item in that container, like a carried animal. Here two fertilized eggs
+    hatch through that method; the trailer then sits loaded for days and unloaded for days, and the
+    chicks are taken out the game's ways: one straight onto the ground, one into the pocket and
+    dropped."""
+    x, y = fresh_spot(s, -480)
+    # Eggs the way a hen lays them: a hen fertilized by a rooster, createEgg (fertilized, hatch
+    # type, breed and genome from the parents), one hour short of hatching. Food.update hatches
+    # them when their time comes (checkEggHatch), with the trailer loaded and the player beside it.
+    made = s.lua(f"local tsq=getCell():getGridSquare({x}+8,{y}-8,0) local v=addVehicleDebug('Base.Trailer_Livestock',IsoDirections.N,nil,tsq) "
+                 "SplintLabServer.et=v local c=v:getPartById('TrailerAnimalEggs'):getItemContainer() "
+                 f"local hd,rd=AnimalDefinitions.getDef('hen'),AnimalDefinitions.getDef('cockerel') "
+                 f"local hen=addAnimal(getCell(),{x}+3,{y},0,'hen',hd:getRandomBreed()) "
+                 f"local rooster=addAnimal(getCell(),{x}+4,{y},0,'cockerel',rd and rd:getRandomBreed() or hd:getRandomBreed()) "
+                 "hen:fertilize(rooster,true) local n=0 for i=1,2 do local egg=hen:createEgg() "
+                 "if egg then egg:setFertilizedTime(math.max(egg:getTimeToHatch()-1,0)) c:AddItem(egg) n=n+1 end end "
+                 "for _,a in ipairs({hen,rooster}) do a:removeFromWorld() a:removeFromSquare() end "
+                 "return 'eggs='..n..' fertilized='..tostring(c:getItems():size()>0 and c:getItems():get(0):isFertilized())"
+                 "..' timeToHatch='..(c:getItems():size()>0 and c:getItems():get(0):getTimeToHatch() or -1)")
+    hatch_clock = wait_game_hours(s, 3)
+    out: dict = {"made": made, "hatch_clock": hatch_clock, "hatched": s.lua(EGG_CHICKS + "return eggChicks()"),
+                 "update_list_after_hatch": s.lua(TOTAL_ANIMALS).split()[-1]}
+    off = s.log_size()
+    out["loaded_5_days"] = {"clock": wait_game_hours(s, 120), "chicks": s.lua(EGG_CHICKS + "return eggChicks()")}
+    s.tp(x + 2000, y, settle=60)
+    out["unloaded_5_days"] = {"clock": wait_game_hours(s, 120)}
+    s.tp(x, y, settle=40)
+    back: dict = {"lua_alive": heartbeat_alive(s)}
+    out["back"] = back
+    if not back["lua_alive"]:
+        out["exceptions"] = exceptions(s.log_since(off))
+        return out
+    back["chicks"] = s.lua(EGG_CHICKS + "return eggChicks()")
+    taken = s.lua(
+        DROP_SQUARE + DESCRIBE_ID + "local p=SplintLabServer.player() local c=SplintLabServer.et:getPartById('TrailerAnimalEggs'):getItemContainer() "
+        "local items={} for i=0,c:getItems():size()-1 do local it=c:getItems():get(i) if instanceof(it,'AnimalInventoryItem') then items[#items+1]=it end end "
+        "local out={} for n,it in ipairs(items) do local id=it:getAnimal():getAnimalID() c:Remove(it) "
+        "local how='to the ground' if n==2 then p:getInventory():AddItem(it) p:getInventory():Remove(it) how='pocket, then dropped' end "
+        "local sq=dropSquare(p,it) sq:AddWorldInventoryItem(it,0.5,0.5,0) "
+        "out[#out+1]=how..' on '..sq:getX()..','..sq:getY()..(sq:isWaterSquare() and ' (water)' or ' (land)')..': '..describe(id) "
+        "SplintLabServer.eggIds=SplintLabServer.eggIds or {} SplintLabServer.eggIds[#SplintLabServer.eggIds+1]=id end "
+        "return table.concat(out,' || ')")
+    time.sleep(30)
+    corpses = (f"local n=0 for dx=-15,15 do for dy=-15,15 do local sq=getCell():getGridSquare({x}+dx,{y}+dy,0) "
+               "if sq then local b=sq:getDeadBodys() for i=0,b:size()-1 do if b:get(i):isAnimal() then n=n+1 end end end end end return n")
+    taken_out: dict = {"drops": taken, "lua_alive": heartbeat_alive(s), "stats_frozen": stats_frozen(s)}
+    out["taken_out"] = taken_out
+    if taken_out["lua_alive"]:
+        taken_out.update(
+            thirty_seconds_later=s.lua(DESCRIBE_ID + "local out={} for _,id in ipairs(SplintLabServer.eggIds or {}) do out[#out+1]=describe(id) end "
+                                       "return table.concat(out,' || ')"),
+            animal_corpses=s.lua(corpses).split()[-1], ghosts_in_update_list=s.lua(LIST_GHOSTS).split()[-1])
+    out["exceptions"] = exceptions(s.log_since(off))
+    return out
+
+
 def ovo_farms(s: Session) -> dict:
     """'Loading OvO Farms and leaving it': the player visits Ovo Farms (its ranch animals spawn on
     first load), leaves so the farm unloads while in-game days pass, and comes back, twice. The
@@ -1045,7 +1281,7 @@ def server_zombie_update(s: Session) -> dict:
 PASTURE = (7333, 8322, 7363, 8347)   # Fallas Lake shore: land up to x=7350, open water from x=7351
 
 
-def pasture_pond(s: Session) -> dict:
+def pasture_pond(s: Session, fence: bool = True) -> dict:
     """Admins' question: can a pasture built over water cause this? A fenced animal zone is made
     the way ISAddDesignationAnimalZoneUI does (DesignationZoneAnimal.new + createSurroundingFence)
     with about a third of it open lake. Farm juveniles with growth ages spread over the next week
@@ -1054,9 +1290,12 @@ def pasture_pond(s: Session) -> dict:
     three days and comes back so the area catches up. Recorded: animals ever on water, ghosts,
     growth, exceptions, whether the world update keeps running."""
     x0, y0, x1, y1 = PASTURE
+    # Unfenced, animals can wander out of the zone: sample and count a wider box around it.
+    m = 0 if fence else 25
     s.tp(*LAKE_SHORE)
     made = s.lua(
-        f"local z=DesignationZoneAnimal.new('splint pond test',{x0},{y0},0,{x1 + 1},{y1 + 1},true) z:createSurroundingFence() "
+        f"local z=DesignationZoneAnimal.new('splint pond test',{x0},{y0},0,{x1 + 1},{y1 + 1},true) "
+        + ("z:createSurroundingFence() " if fence else "") +
         f"local water,land=0,0 for x={x0},{x1} do for y={y0},{y1} do local sq=getCell():getGridSquare(x,y,0) "
         "if sq then if sq:isWaterSquare() then water=water+1 else land=land+1 end end end end "
         "return 'water='..water..' land='..land")
@@ -1076,12 +1315,12 @@ def pasture_pond(s: Session) -> dict:
     s.lua(f"SplintLabServer.pond={{max=0,samples=0,wet=0,ids={{}}}} local P=SplintLabServer.pond local tick=0 "
           "SplintLabServer.pondTick=function() tick=tick+1 if tick%10~=0 then return end local w=0 "
           "local l=getCell():getObjectListForLua() for i=0,l:size()-1 do local o=l:get(i) if instanceof(o,'IsoAnimal') then "
-          f"local x,y=o:getX(),o:getY() if x>={x0} and x<={x1 + 1} and y>={y0} and y<={y1 + 1} then local sq=o:getCurrentSquare() "
+          f"local x,y=o:getX(),o:getY() if x>={x0 - m} and x<={x1 + 1 + m} and y>={y0 - m} and y<={y1 + 1 + m} then local sq=o:getCurrentSquare() "
           "if sq and sq:isWaterSquare() then w=w+1 P.ids[o:getAnimalID()]=true end end end end "
           "P.samples=P.samples+1 P.wet=P.wet+w if w>P.max then P.max=w end end "
           "Events.OnTick.Add(SplintLabServer.pondTick) return 1")
     state = ("local n,types,g=0,{},0 local l=getCell():getObjectListForLua() for i=0,l:size()-1 do local o=l:get(i) "
-             f"if instanceof(o,'IsoAnimal') then local x,y=o:getX(),o:getY() if x>={x0 - 4} and x<={x1 + 5} and y>={y0 - 4} and y<={y1 + 5} then "
+             f"if instanceof(o,'IsoAnimal') then local x,y=o:getX(),o:getY() if x>={x0 - 4 - m} and x<={x1 + 5 + m} and y>={y0 - 4 - m} and y<={y1 + 5 + m} then "
              "n=n+1 local t=tostring(o:getAnimalType()) types[t]=(types[t] or 0)+1 "
              "if o:getData()==nil or o:getAnimalType()==nil then g=g+1 end end end end "
              "local P=SplintLabServer.pond local ever=0 for _ in pairs(P.ids) do ever=ever+1 end local out={} "
@@ -1101,7 +1340,7 @@ def pasture_pond(s: Session) -> dict:
     else:
         # Every animal by ID before leaving, to tell animals that come back late from animals that are gone.
         ids = ("local out={} local l=getCell():getObjectListForLua() for i=0,l:size()-1 do local o=l:get(i) "
-               f"if instanceof(o,'IsoAnimal') and o:getData() then local x,y=o:getX(),o:getY() if x>={x0 - 4} and x<={x1 + 5} and y>={y0 - 4} and y<={y1 + 5} then "
+               f"if instanceof(o,'IsoAnimal') and o:getData() then local x,y=o:getX(),o:getY() if x>={x0 - 4 - m} and x<={x1 + 5 + m} and y>={y0 - 4 - m} and y<={y1 + 5 + m} then "
                "out[#out+1]=o:getAnimalID()..':'..tostring(o:getAnimalType()) end end end return table.concat(out,' ')")
         before = dict(item.split(":", 1) for item in s.lua(ids).split()[2:])
         s.tp(LAKE_SHORE[0] + 2000, LAKE_SHORE[1], settle=30)
@@ -1118,7 +1357,7 @@ def pasture_pond(s: Session) -> dict:
                 kinds: dict = {}
                 for k in missing:
                     kinds[before[k]] = kinds.get(before[k], 0) + 1
-                corpses = s.lua(f"local t={{}} for x={x0 - 4},{x1 + 5} do for y={y0 - 4},{y1 + 5} do local sq=getCell():getGridSquare(x,y,0) "
+                corpses = s.lua(f"local t={{}} for x={x0 - 4 - m},{x1 + 5 + m} do for y={y0 - 4 - m},{y1 + 5 + m} do local sq=getCell():getGridSquare(x,y,0) "
                                 "if sq then local b=sq:getDeadBodys() for i=0,b:size()-1 do local d=b:get(i) if d:isAnimal() then "
                                 "local k=tostring(d:getAnimalType()) t[k]=(t[k] or 0)+1 end end end end end "
                                 "local out={} for k,v in pairs(t) do out[#out+1]=k..'='..v end return '['..table.concat(out,',')..']'")
@@ -1248,6 +1487,10 @@ EXTRA["aging-rates"] = aging_rates
 EXTRA["stored-on-water-growth"] = stored_on_water_growth
 EXTRA["server-zombie-update"] = server_zombie_update
 EXTRA["pasture-pond"] = pasture_pond
+EXTRA["pasture-pond-unfenced"] = lambda s: pasture_pond(s, fence=False)
+EXTRA["drop-on-water"] = drop_on_water
+EXTRA["trailer-unload-dead"] = trailer_unload_dead
+EXTRA["trailer-egg-compartment"] = trailer_egg_compartment
 
 
 def start(evidence: Path, agent: str | None, resume: Path | None = None) -> Session:
