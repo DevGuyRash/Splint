@@ -7,7 +7,7 @@ import splint.core.patch.PatchRegistry;
 
 /** Version and the per-frame heartbeat that drives every module. */
 public final class Splint {
-    public static final String VERSION = "0.3.0";
+    public static final String VERSION = "0.4.0";
     private static final long SUMMARY_MS = 60_000;
 
     private static boolean started;
