@@ -18,7 +18,7 @@ The report's hypothesis about IDs is right that IDs are not unique: they are `Ra
 
 A ghost also breaks saving. While one exists, every save fails partway through the animal population (the console still prints "World saved") and the shutdown save never finishes, so a restart falls back to saves from before the ghost (finding 14). That is why the incident server needed a 20-hour rollback, and why the problem came back: the cause recurs. One cause fits the report's trailer clue and is reproduced: unloading a livestock trailer backed up to water builds the unloaded animals on a water square, where they come out half-built (finding 15). Dropping a carried animal from the seat of a vehicle whose door is over water does the same (finding 21). The other clues (logging in next to a trailer of chickens, carrying chickens or carcasses, butchering, Ovo Farms) were tested and ruled out (finding 16).
 
-Status: Splint 0.3.0 keeps every reproduced failure from stopping the world update or a save, and loses no animals in any lab scenario. Which cause made the incident server's first ghost is not proven (see "Still open").
+Status: Splint 0.4.0 keeps every reproduced failure from stopping the world update, a save or the rest of the map (finding 22), and loses no animals in any lab scenario. Which cause made the incident server's first ghost is not proven (see "Still open").
 
 ## Findings
 
