@@ -4,6 +4,7 @@ import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
 import java.lang.invoke.VarHandle;
+import java.nio.BufferOverflowException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
@@ -14,6 +15,8 @@ import splint.core.isolate.Breaker;
 import splint.core.patch.Originals;
 import splint.core.world.World;
 import zombie.characters.animals.IsoAnimal;
+import zombie.characters.animals.datas.AnimalBreed;
+import zombie.characters.animals.datas.AnimalData;
 import zombie.iso.IsoCell;
 import zombie.iso.IsoChunk;
 import zombie.iso.IsoGridSquare;
@@ -50,6 +53,7 @@ public final class AnimalHooks {
             "grow", void.class, String.class); }
     private static final class SaveReal { static final MethodHandle H = Originals.virtual("zombie.characters.animals.AnimalManagerMain",
             "saveRealAnimals", void.class); }
+    private static final class Save { static final MethodHandle H = Originals.virtual(IsoAnimal.class, "save", void.class, ByteBuffer.class, boolean.class, boolean.class); }
     private static final class HerdSave {
         static final MethodHandle H = Originals.virtual("zombie.characters.animals.VirtualAnimal", "save", void.class, ByteBuffer.class);
         /** VirtualAnimal.animals is package-private; both classes live in the unnamed module. */
@@ -467,28 +471,93 @@ public final class AnimalHooks {
 
     /**
      * Last line of defence for the population save. VirtualAnimal.save writes the herd's animal
-     * count and then each animal, and IsoAnimal.save throws on an animal without data. In vanilla
-     * one such animal aborts the whole save: the console still says "World saved", but the
-     * animals after it are never written and a shutdown save never finishes. Splint keeps ghosts
-     * from forming and sweeps them before unload and save; this drops any that still reach a
-     * herd (from a source nobody has found yet) before the herd is counted, so the file stays
-     * consistent. Runs on the population worker thread and touches only the herd being saved.
+     * count and then each animal, and IsoAnimal.save throws on an animal it cannot write. In
+     * vanilla one such animal aborts the whole save after the map cell's apop file has already
+     * been emptied for writing: the cell's animals are gone from disk, the cells after it are not
+     * written and a shutdown save never finishes (docs/investigation.md, "Saving, restarting and the apop files").
+     *
+     * <p>Splint keeps ghosts from forming and sweeps them before unload and save; this drops any
+     * that still reach a herd before the herd is counted. Any other animal that cannot be written
+     * is left out of the file (it stays in the game) and the rest of the herd is written. Runs on
+     * the population worker thread and touches only the herd being saved; a herd that saves
+     * normally is written once, by vanilla's own code.
      */
     public static void herdSave(Object herd, ByteBuffer out) throws Throwable {
         @SuppressWarnings("unchecked")
         ArrayList<IsoAnimal> animals = (ArrayList<IsoAnimal>) HerdSave.ANIMALS.get(herd);
-        if (animals != null) {
-            for (int i = animals.size() - 1; i >= 0; i--) {
-                IsoAnimal a = animals.get(i);
-                if (a == null || AnimalOps.isGhost(a)) {
-                    animals.remove(i);
-                    AnimalStats.GHOSTS_REMOVED.incrementAndGet();
-                    Log.problem("WARN", "ghost-dropped-at-save", () -> "dropped an uninitialised animal from a herd being saved "
-                            + "(it would have aborted the save): " + (a == null ? "null entry" : AnimalOps.brief(a)), null);
-                }
+        if (animals == null) {
+            HerdSave.H.invoke(herd, out);
+            return;
+        }
+        for (int i = animals.size() - 1; i >= 0; i--) {
+            IsoAnimal a = animals.get(i);
+            if (a == null || AnimalOps.isGhost(a)) {
+                animals.remove(i);
+                AnimalStats.GHOSTS_REMOVED.incrementAndGet();
+                Log.problem("WARN", "ghost-dropped-at-save", () -> "dropped an uninitialised animal from a herd being saved "
+                        + "(it would have aborted the save): " + (a == null ? "null entry" : AnimalOps.brief(a)), null);
             }
         }
-        HerdSave.H.invoke(herd, out);
+        int start = out.position();
+        try {
+            HerdSave.H.invoke(herd, out);
+        } catch (VirtualMachineError | BufferOverflowException e) {
+            throw e;                                 // the save's buffer is full: no animal is at fault
+        } catch (Throwable t) {
+            out.position(start);
+            ArrayList<IsoAnimal> all = new ArrayList<>(animals);
+            animals.removeIf(a -> !canSave(a, out));
+            if (animals.size() == all.size()) throw t;
+            try {
+                HerdSave.H.invoke(herd, out);
+            } finally {
+                animals.clear();
+                animals.addAll(all);
+            }
+        }
+    }
+
+    /**
+     * Every save of an animal ends here: in a herd, a hutch, a nest box, a trailer, an inventory
+     * item or a network packet. It writes the breed's name, so an animal that has lost its breed
+     * throws and takes its herd, its hutch's chunk or its trailer down with it. Vanilla's own
+     * answer to a missing breed (AnimalData's constructor) is to pick one from the animal's
+     * definition; do the same, so nothing has to be left out.
+     */
+    public static void save(IsoAnimal self, ByteBuffer out, boolean isDebugSave, boolean withHeader) throws Throwable {
+        AnimalData data = self.getData();
+        if (data != null && data.getBreed() == null) giveBreed(self, data);
+        Save.H.invokeExact(self, out, isDebugSave, withHeader);
+    }
+
+    private static void giveBreed(IsoAnimal a, AnimalData data) {
+        List<AnimalBreed> breeds = a.getAdef() == null ? null : a.getAdef().getBreeds();
+        if (breeds == null || breeds.isEmpty()) return;
+        data.setBreed(breeds.get(0));
+        AnimalStats.BREEDS_RESTORED.incrementAndGet();
+        boolean full = Log.problem("WARN", "breed-restored", () -> "an animal had no breed, so it could not be saved; gave it its type's first breed: "
+                + AnimalOps.describe(a), null);
+        AnimalOps.incident("no breed; gave it one", a, full);
+    }
+
+    /** Whether the animal can be written at all: tried in the save's own buffer, then rewound. */
+    private static boolean canSave(IsoAnimal a, ByteBuffer out) {
+        int start = out.position();
+        try {
+            a.save(out, false);
+            return true;
+        } catch (VirtualMachineError | BufferOverflowException e) {
+            throw e;
+        } catch (Throwable t) {
+            AnimalStats.UNSAVEABLE.incrementAndGet();
+            boolean full = Log.problem("ERROR", "unsaveable:" + t.getClass().getName() + ":" + t.getMessage(),
+                    () -> "this animal cannot be saved (" + t + "); left out of the save so the others are written: "
+                            + AnimalOps.describe(a), t);
+            AnimalOps.incident("cannot be saved", a, full);
+            return false;
+        } finally {
+            out.position(start);
+        }
     }
 
 }

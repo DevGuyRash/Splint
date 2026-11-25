@@ -15,7 +15,7 @@ import zombie.network.ServerMap;
  *
  * <p>Vanilla's {@code ServerMap.postupdate} has one try around its loop over the loaded cells: a
  * cell that throws ends the loop, so every later cell is neither updated nor unloaded, and since
- * the failed cell stays in the list this repeats every tick (docs/investigation.md, finding 22).
+ * the failed cell stays in the list this repeats every tick (docs/investigation.md, "Its map area never unloads").
  *
  * <p>Failures are contained at the smallest unit first. An object that cannot be removed is
  * skipped and the rest of its chunk unloads. A chunk that cannot be removed is still saved, as

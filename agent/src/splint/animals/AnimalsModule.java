@@ -41,6 +41,8 @@ public final class AnimalsModule implements SplintModule {
             new Patch(ANIMAL, "removeFromWorld", "()V", HOOKS, "removeFromWorld"),
             new Patch(ANIMAL, "delete", "()V", HOOKS, "delete"),
             new Patch(ANIMAL, "unloaded", "()V", HOOKS, "unloaded"),
+            // Saving: every place that stores an animal writes it through this method.
+            new Patch(ANIMAL, "save", "(Ljava/nio/ByteBuffer;ZZ)V", HOOKS, "save"),
             // Population bookkeeping that serialises or virtualises every animal it is handed.
             new Patch(POPULATION, "removeChunkFromWorld", "(Lzombie/iso/IsoChunk;)V", HOOKS, "removeChunkFromWorld", true),
             new Patch(POPULATION, "virtualizeAnimal", "(Lzombie/characters/animals/IsoAnimal;)V", HOOKS, "virtualizeAnimal", true),

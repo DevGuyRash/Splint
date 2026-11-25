@@ -14,6 +14,8 @@ final class AnimalStats {
     static final AtomicLong WATER_RELOCATIONS = c("waterRelocations");
     static final AtomicLong REMOVAL_FAILURES = c("removalFailuresContained");
     static final AtomicLong HUTCH_FAILURES = c("hutchFailuresContained");
+    static final AtomicLong BREEDS_RESTORED = c("breedsRestored");
+    static final AtomicLong UNSAVEABLE = c("unsaveableAnimalsSkipped");
     static final AtomicLong KILLED_BY_COMMAND = c("killedByCommand");
 
     private AnimalStats() {}
