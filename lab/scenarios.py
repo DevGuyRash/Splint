@@ -603,10 +603,11 @@ TRAILER_LIST = (TRAILER + "local v=trailer() if not v then return 'no trailer' e
                 "return #out..' '..table.concat(out,',')")
 
 
-def restart(s: Session, agent: str | None | bool = True) -> tuple[Session, dict]:
+def restart(s: Session, agent: str | None | bool = True, edit=None) -> tuple[Session, dict]:
     """Saves the world through the server's own `quit` and starts a new session on that save, as
     a restart (or a rollback to the latest save) does on a live server. The player logs back in
-    as the same character. `agent=True` keeps the first session's agent; a path or None picks."""
+    as the same character. `agent=True` keeps the first session's agent; a path or None picks.
+    `edit` is called with the save's folder while the server is stopped."""
     off = s.log_size()
     server_log = s.evidence / "server.log"
     log_off = server_log.stat().st_size
@@ -619,6 +620,8 @@ def restart(s: Session, agent: str | None | bool = True) -> tuple[Session, dict]
     saving = {"quit": quit_out[-1] if quit_out else "unknown", "exceptions_while_saving": exceptions(s.log_since(off)),
               "worker_thread_died": "Exception in thread" in stderr_tail}
     chosen = json.loads((s.evidence / "session.json").read_text()).get("agent") if agent is True else agent
+    if edit:
+        saving["edited"] = edit(next(s.evidence.glob("server-cache/Saves/Multiplayer/*/apop")).parent)
     s2 = start(s.evidence.with_name(s.evidence.name + "-resumed"), chosen or None, resume=s.evidence)
     s.children.append(s2)
     return s2, saving
@@ -1127,7 +1130,7 @@ MARKED = ("local sq=getCell():getGridSquare(%d,%d,0) if not sq then return 'no s
 
 def presence_cycle(s: Session, ghost: bool = True) -> dict:
     """A player arrives at and leaves a ghost's area twice, travelling on in between. The ghost is
-    the kind finding 5 leaves behind: on its square but out of the update list. Made with a type
+    the kind growth beside a ghost leaves behind: on its square but out of the update list. Made with a type
     that has no definition, on land, so that Splint does not prevent it and its removal at chunk
     unload is what gets tested. `ghost=False` is the same trip without one. Moving by teleport
     stands in for other players staying online while one leaves. Axes dropped in chunks that
@@ -1553,6 +1556,161 @@ def time_chamber(s: Session) -> dict:
     return {"rows": rows}
 
 
+# Breaks an animal the way a faulty mod could: fully initialised, but with no breed, which every
+# save of it (IsoAnimal.save writes the breed's name) trips over.
+NO_BREED = "a:getData():setBreed(nil) "
+# The same with no descriptor (the save writes the animal's sex from it): damage Splint does not repair.
+NO_DESCRIPTOR = "a:setDescriptor(nil) "
+HUTCH_LIST = ("local function hutchNear(x,y) for dx=-12,12 do for dy=-12,12 do local sq=getCell():getGridSquare(x+dx,y+dy,0) "
+              "if sq then local l=sq:getObjects() for i=0,l:size()-1 do local o=l:get(i) "
+              "if instanceof(o,'IsoHutch') and not o:isSlave() then return o end end end end end end "
+              "local h=hutchNear(%d,%d) if not h then return 'no hutch' end local out={} "
+              "for i=0,h:getMaxAnimals()-1 do local a=h:getAnimal(i) if a then out[#out+1]=tostring(a:getAnimalType())..'#'..a:getAnimalID() end end "
+              "return #out..' '..table.concat(out,',')")
+
+
+def damaged_save(s: Session, place: str, damage: str = NO_BREED) -> dict:
+    """One animal that cannot be saved (no breed, unless `damage` says otherwise) sits on the ground, in a hutch, in a trailer or
+    in a pocket when the server saves and restarts. What else is lost with it? Each place also
+    holds healthy animals, and six healthy hens stand beside the player as a control."""
+    x, y = fresh_spot(s, 120)
+    s.lua("local p=SplintLabServer.player() p:setGodMod(true) p:setInvincible(true) return 1")
+    s.server("spawn hen - 6 -4 0 1 30")
+    hen = "AnimalDefinitions.getDef('hen'):getRandomBreed()"
+    chick = "AnimalDefinitions.getDef('chick'):getRandomBreed()"
+    if place == "ground":
+        setup = (f"for i=1,3 do local a=addAnimal(getCell(),{x}+4+i,{y}+4,0,'hen',{hen}) a:addToWorld() if i==2 then broken=a end end ")
+    elif place == "hutch":
+        setup = (f"local def=HutchDefinitions.hutchs['hutchhen'] local sq=getCell():getGridSquare({x}-6,{y}+6,0) "
+                 "local h=IsoHutch.new(sq,true,def.baseSprite,def,nil) h:transmitCompleteItemToClients() "
+                 f"for i=0,2 do local a=addAnimal(getCell(),0,0,0,'chick',{chick}) a:getData():setPreferredHutchPosition(i) "
+                 "h:addAnimalInside(a) if i==1 then broken=a end end ")
+    elif place == "trailer":
+        setup = (f"local sq=getCell():getGridSquare({x}+8,{y}-8,0) local v=addVehicleDebug('Base.Trailer_Livestock',IsoDirections.N,nil,sq) "
+                 f"for i=1,3 do local a=addAnimal(getCell(),{x}+8,{y}-8,0,'hen',{hen}) v:addAnimalInTrailer(a) end "
+                 "broken=v:getAnimals():get(1) ")
+    else:
+        setup = ("local p=SplintLabServer.player() p:getInventory():AddItem('Base.Hammer') "
+                 f"for i=1,3 do local c=addAnimal(getCell(),{x}+2,{y},0,'chick',{chick}) c:addToWorld() "
+                 "local item=instanceItem('Base.Animal') item:setAnimal(c) c:removeFromWorld() c:removeFromSquare() "
+                 "p:getInventory():AddItem(item) if i==2 then broken=c end end ")
+
+    def look(t: Session) -> dict:
+        out = {"on_the_ground": t.lua(f"local n={{}} for _,a in ipairs(SplintLabServer.animalsOnSquares({x},{y},0,30)) do "
+                                      "local k=tostring(a:getAnimalType()) n[k]=(n[k] or 0)+1 end local o={} "
+                                      "for k,v in pairs(n) do o[#o+1]=k..'='..v end return 'ground: '..table.concat(o,',')").split("ground: ")[-1]}
+        if place == "hutch":
+            out["hutch"] = t.lua(HUTCH_LIST % (x, y))
+        elif place == "trailer":
+            out["trailer"] = t.lua(TRAILER_LIST)
+        else:
+            out["inventory"] = t.lua(INVENTORY_ANIMALS)
+            out["hammers"] = t.lua("return SplintLabServer.player():getInventory():getCountTypeRecurse('Base.Hammer')").split()[-1]
+        return out
+
+    s.lua("local broken=nil " + setup + "SplintLabServer.broken=broken return broken:getAnimalID()")
+    time.sleep(12)
+    # A save while everything is healthy: what the failing save afterwards must not destroy.
+    off = s.log_size()
+    s.console_cmd("save")
+    time.sleep(40)
+    out: dict = {"place": place, "healthy_save_finished": "Saving finish" in s.log_since(off), "before": look(s)}
+    off = s.log_size()
+    out["damaged"] = s.lua("local a=SplintLabServer.broken " + damage + "return a:getAnimalID()").split()[-1]
+    time.sleep(8)
+    out["exceptions_before_save"] = exceptions(s.log_since(off))
+    off = s.log_size()
+    s2, out["save_and_quit"] = restart(s)
+    log = s.log_since(off)
+    out["saving_finished"] = "Saving finish" in log
+    out["splint_lines"] = [l.strip()[:300] for l in log.splitlines() if "Splint]" in l and ("WARN" in l or "ERROR" in l)][:6]
+    # The resumed session took over the save folder; a blanked file that was loaded says so in its log.
+    out["blank_apop_files"] = sorted({f.name for e in (s, s2) for f in e.evidence.glob("server-cache/Saves/Multiplayer/*/apop/*.bin")
+                                      if f.stat().st_size == 0})
+    out["blank_apop_load_errors"] = s2.log_since(0).count("newLimit < 0: (-1 < 0)")
+    out["after_restart"] = after_login(s2, x, y)
+    if out["after_restart"]["lua_alive"]:
+        out["after_restart"].update(look(s2))
+    return out
+
+
+def wipe_apop(save: Path) -> dict:
+    files = list((save / "apop").glob("*.bin"))
+    for f in files:
+        f.unlink()
+    return {"apop_files_deleted": len(files)}
+
+
+GROUND = ("local l=getCell():getObjectListForLua() local n={} for i=0,l:size()-1 do local a=l:get(i) "
+          "if instanceof(a,'IsoAnimal') then local k=tostring(a:getAnimalType()) n[k]=(n[k] or 0)+1 end end "
+          "local o={} for k,v in pairs(n) do o[#o+1]=k..'='..v end table.sort(o) return 'ground: '..table.concat(o,',')")
+
+
+def ground(s: Session) -> str:
+    return s.lua(GROUND).split("ground: ")[-1]
+
+
+def apop_wipe(s: Session, wipe: bool) -> dict:
+    """A player's suggestion: stop the server, delete every apop file, start it: does that reset the
+    animals? The player visits Ovo Farms (its own animals spawn), a full save is made, a ghost
+    stops the world, and the server restarts with or without the wipe."""
+    s.tp(*OVO_FARMS, settle=45)
+    out: dict = {"farm_before": ground(s)}
+    s.tp(*LAKE_SHORE, settle=30)
+    s.server("spawn hen - 6 -3 0 1 30")
+    off = s.log_size()
+    s.console_cmd("save")
+    time.sleep(45)
+    out["healthy_save_finished"] = "Saving finish" in s.log_since(off)
+    out["lake_before"] = ground(s)
+    off = s.log_size()
+    s.lua(f"local d=AnimalDefinitions.getDef('hen') addAnimal(getCell(),{LAKE_WATER[0]},{LAKE_WATER[1]},0,'hen',d:getRandomBreed()) return 1")
+    time.sleep(15)
+    out["with_ghost"] = {"lua_alive": heartbeat_alive(s), "exceptions": exceptions(s.log_since(off))}
+    s2, out["save_and_quit"] = restart(s, edit=wipe_apop if wipe else None)
+    out["after_restart"] = after_login(s2, *LAKE_SHORE)
+    if out["after_restart"]["lua_alive"]:
+        out["after_restart"]["lake"] = ground(s2)
+        s2.tp(*OVO_FARMS, settle=45)
+        out["after_restart"]["farm"] = ground(s2)
+    return out
+
+
+def removed_type(s: Session) -> dict:
+    """An animal mod is removed while one of its animals is in the save. The mod is simulated by
+    renaming one saved turkey's type, in the stopped server's apop file, to a type nobody defines.
+    The server then starts on that save twice."""
+    x, y = fresh_spot(s, 120)
+    s.server("spawn hen - 6 -4 0 1 30")
+    s.server("spawn turkeyhen - 1 5 0 0 200")
+    out: dict = {"before": ground(s)}
+
+    def rename(save: Path) -> dict:
+        old, new = b"\x00\x09turkeyhen", b"\x00\x09removedmd"
+        done = {}
+        for f in (save / "apop").glob("*.bin"):
+            data = f.read_bytes()
+            if old in data:
+                f.write_bytes(data.replace(old, new))
+                done[f.name] = {"renamed": data.count(old), "hens_in_file": data.count(b"\x00\x03hen")}
+        return done
+
+    s2, out["first_restart"] = restart(s, edit=rename)
+
+    def state(t: Session) -> dict:
+        st = after_login(t, x, y)
+        st["load_exceptions"] = exceptions(t.log_since(0)[:t.ready_offset])
+        if st["lua_alive"]:
+            st["animals"] = ground(t)
+        st["splint_lines"] = [l.strip()[:300] for l in t.log_since(0).splitlines() if "Splint]" in l and ("WARN" in l or "ERROR" in l)][:6]
+        return st
+
+    out["after_first"] = state(s2)
+    s3, out["second_restart"] = restart(s2)
+    out["after_second"] = state(s3)
+    return out
+
+
 OPEN_QUESTIONS = {f.__name__.replace("_", "-"): f for f in
                   (ghost_save_restart, ghost_save_splint_resume, pocket_far_growth, pocket_relog, carcass_relog,
                    trailer_relog, trailer_unload_water, ovo_farms, hutch_pocket, weapon_kill_butcher)}
@@ -1576,6 +1734,12 @@ EXTRA["drop-on-water"] = drop_on_water
 EXTRA["trailer-unload-dead"] = trailer_unload_dead
 EXTRA["trailer-egg-compartment"] = trailer_egg_compartment
 EXTRA["presence-cycle"] = presence_cycle
+for _place in ("ground", "hutch", "trailer", "pocket"):
+    EXTRA[f"damaged-save-{_place}"] = lambda s, place=_place: damaged_save(s, place)
+EXTRA["apop-wipe"] = lambda s: apop_wipe(s, True)
+EXTRA["apop-wipe-control"] = lambda s: apop_wipe(s, False)
+EXTRA["removed-type"] = removed_type
+EXTRA["damaged-save-ground-unrepairable"] = lambda s: damaged_save(s, "ground", NO_DESCRIPTOR)
 EXTRA["presence-cycle-control"] = lambda s: presence_cycle(s, ghost=False)
 
 
