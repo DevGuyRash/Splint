@@ -364,8 +364,7 @@ INVENTORY_ANIMALS = ("local p=SplintLabServer.player() local items=p:getInventor
 
 
 def inventory_growth(s: Session) -> dict:
-    """A chick carried in the player's inventory reaches its growth age (the report's
-    'ghost chicken in my pocket' theory)."""
+    """A chick carried in the player's inventory reaches its growth age."""
     x, y = fresh_spot(s, -120)
     s.lua("local p=SplintLabServer.player() local cd=AnimalDefinitions.getDef('chick') "
           "local c=addAnimal(getCell(),math.floor(p:getX())+2,math.floor(p:getY()),0,'chick',cd:getRandomBreed()) c:addToWorld() "
@@ -671,7 +670,7 @@ def _ghost_then_restart(s: Session, agent: str | None | bool) -> dict:
 
 
 def ghost_save_restart(s: Session) -> dict:
-    """Open question: did the rollback help by changing the save, or only by restarting? A ghost
+    """Does a rollback help by changing the save, or only by restarting? A ghost
     is in the world (world update stopped on vanilla), the server saves and quits, and the same
     world starts again: does the ghost come back, does the save break?"""
     return _ghost_then_restart(s, True)
@@ -763,8 +762,8 @@ def pocket_relog(s: Session) -> dict:
 
 
 def carcass_relog(s: Session) -> dict:
-    """'I butchered some chickens before I logged ... possibly a ghost chicken in my pocket': the
-    player carries chicken carcasses (as picked up from the ground) when they log out and back in."""
+    """The player carries chicken carcasses (as picked up from the ground) when they log out and
+    back in."""
     x, y = fresh_spot(s, 600)
     s.server("spawn hen - 3 2 0 0 30")
     killed = s.lua(f"local n=0 for _,a in ipairs(SplintLabServer.animalsOnSquares({x},{y},0,6)) do a:setHealth(0) n=n+1 end return n")
@@ -795,8 +794,7 @@ def carcass_relog(s: Session) -> dict:
 
 
 def trailer_relog(s: Session) -> dict:
-    """'One person having found a trailer full of chickens and whenever they log on it comes
-    back': the player logs out next to a livestock trailer of chicks and hens, logs back in, and
+    """The player logs out next to a livestock trailer of chicks and hens, logs back in, and
     the chicks reach their growth age."""
     x, y = fresh_spot(s, -240)
     made = s.lua(f"local tsq=getCell():getGridSquare({x}+8,{y}-8,0) local v=addVehicleDebug('Base.Trailer_Livestock',IsoDirections.N,nil,tsq) "
@@ -962,8 +960,8 @@ def drop_on_water(s: Session) -> dict:
 
 
 def trailer_unload_dead(s: Session) -> dict:
-    """The player who started the incident unloaded a trailer of dead hens and chicks on land: one
-    chick 'said it was alive' but came out dead, another gave 'a blood animation without any body'.
+    """Unloading dead, dying and living animals from a trailer on land: do living ones come out
+    alive, and does every dead one leave a body?
     removeAnimalFromTrailer builds every animal anew at the trailer's entry, and when the old one is
     dead (it tests the old one) makes a corpse from the new one. Unloaded here the game's way
     (ISRemoveAnimalFromTrailer:complete): healthy, dying and dead animals, one grabbed into the
@@ -1041,8 +1039,8 @@ EGG_CHICKS = ("local function eggChicks() local c=SplintLabServer.et:getPartById
 
 
 def trailer_egg_compartment(s: Session) -> dict:
-    """'Baby chickens that hatched into the egg compartment' of a livestock trailer that had been
-    abandoned a long time; taken out, one 'said it was alive, but it plopped onto the ground dead'.
+    """Chicks that hatch in the egg compartment of a livestock trailer left for a long time: are
+    they alive, and do they stay alive when taken out?
     Food.checkEggHatch builds a chick hatching in a trailer container at the trailer's square, then
     wraps it in an Animal item in that container, like a carried animal. Here two fertilized eggs
     hatch through that method; the trailer then sits loaded for days and unloaded for days, and the
@@ -1184,7 +1182,7 @@ def presence_cycle(s: Session, ghost: bool = True) -> dict:
 
 
 def ovo_farms(s: Session) -> dict:
-    """'Loading OvO Farms and leaving it': the player visits Ovo Farms (its ranch animals spawn on
+    """The player visits Ovo Farms (its ranch animals spawn on
     first load), leaves so the farm unloads while in-game days pass, and comes back, twice. The
     farm's chicks are set one day short of growing, so they cross their growth age while nobody
     is there and the area catches up when it loads again."""
@@ -1277,7 +1275,7 @@ WEAPON_PICKS = ("local all=getScriptManager():getAllItems() local seen,picks={},
 
 
 def weapon_kill_butcher(s: Session) -> dict:
-    """'I butchered some chickens before I logged': a hen is killed with one weapon from every
+    """A hen is killed with one weapon from every
     weapon category through the game's own hit code, each carcass is butchered the way
     ISButcherAnimal does, one carcass is carried, and the player logs out and back in while
     in-game days pass."""
@@ -1369,7 +1367,7 @@ PASTURE = (7333, 8322, 7363, 8347)   # Fallas Lake shore: land up to x=7350, ope
 
 
 def pasture_pond(s: Session, fence: bool = True) -> dict:
-    """Admins' question: can a pasture built over water cause this? A fenced animal zone is made
+    """Can a pasture built over water cause a ghost? A fenced animal zone is made
     the way ISAddDesignationAnimalZoneUI does (DesignationZoneAnimal.new + createSurroundingFence)
     with about a third of it open lake. Farm juveniles with growth ages spread over the next week
     (from the game's stage table) and hens are placed on dry land inside. A server ticker samples
@@ -1651,9 +1649,9 @@ def ground(s: Session) -> str:
 
 
 def apop_wipe(s: Session, wipe: bool) -> dict:
-    """A player's suggestion: stop the server, delete every apop file, start it: does that reset the
-    animals? The player visits Ovo Farms (its own animals spawn), a full save is made, a ghost
-    stops the world, and the server restarts with or without the wipe."""
+    """Stop the server, delete every apop file, start it: does that reset the animals? The player
+    visits Ovo Farms (its own animals spawn), a full save is made, a ghost stops the world, and the
+    server restarts with or without the wipe."""
     s.tp(*OVO_FARMS, settle=45)
     out: dict = {"farm_before": ground(s)}
     s.tp(*LAKE_SHORE, settle=30)

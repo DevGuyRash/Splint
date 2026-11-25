@@ -1,6 +1,6 @@
 # Animal failure investigation
 
-What was checked, how, and what was found about the multiplayer "world in limbo" incident (incident report, 2026-11-22). The report's own conclusions were treated as hypotheses to test. Everything here was measured on Project Zomboid 42.22.2.
+What was checked, how, and what was found about the multiplayer "world in limbo" failure, starting from a report of it. The report's own conclusions were treated as hypotheses to test. Everything here was measured on Project Zomboid 42.22.2.
 
 ## Contents
 
@@ -11,7 +11,7 @@ What was checked, how, and what was found about the multiplayer "world in limbo"
 5. [Saving, restarting and the apop files](#saving-restarting-and-the-apop-files)
 6. [Animals lost without an error](#animals-lost-without-an-error)
 7. [How animals age and are stored](#how-animals-age-and-are-stored)
-8. [The incident, clue by clue](#the-incident-clue-by-clue)
+8. [Reported symptoms and suspected causes](#reported-symptoms-and-suspected-causes)
 9. [What Splint does about each](#what-splint-does-about-each)
 10. [Lab results](#lab-results)
 11. [Still open](#still-open)
@@ -25,11 +25,11 @@ What was checked, how, and what was found about the multiplayer "world in limbo"
 - **What clears it:** a restart. The ghost is only in memory and is never saved. Deleting `apop` files adds nothing except losing the animals in them. The failure returns when whatever made the ghost happens again.
 - **What it is not:** the random, non-unique animal IDs. Those cause a different, silent bug: animals that vanish when they grow.
 - **What Splint does:** keeps every reproduced failure from stopping the world update, a save or the rest of the map, and loses no animals in any lab scenario except ones the lab damaged beyond saving or whose type no longer exists.
-- **What is not known:** which cause made the incident server's first ghost. See [Still open](#still-open).
+- **What is not known:** which cause made the first ghost on a real server. See [Still open](#still-open).
 
 ## How this was tested
 
-- **Game:** 42.22.2 (`version=42.22.2 3d39148846`), the dedicated server installed with steamcmd as app 380870, buildid 26486687. Its `java/projectzomboid.jar` is byte-identical to the client's (SHA-256 `3c4a7c5f…d120d287`), so the decompiled code (Vineflower 1.11.1) is exactly what the server runs. Line numbers refer to the decompiled sources, not to the runtime line numbers in the incident's stack trace.
+- **Game:** 42.22.2 (`version=42.22.2 3d39148846`), the dedicated server installed with steamcmd as app 380870, buildid 26486687. Its `java/projectzomboid.jar` is byte-identical to the client's (SHA-256 `3c4a7c5f…d120d287`), so the decompiled code (Vineflower 1.11.1) is exactly what the server runs. Line numbers refer to the decompiled sources, not to the runtime line numbers in the reported stack trace.
 - **Lab:** one dedicated server (`-nosteam`, loopback) plus one headless game client on a private Xvfb display, so chunks load around a real connected player. Default sandbox except zombies off. Each scenario (`lab/scenarios.py`) runs in a fresh session, without Splint and with it.
 - **Restarts are real:** the server saves through its own `quit`, and a new session continues that save with the same player (`splintlab.py start --resume`).
 - **In-game time** runs in a "time chamber": one real minute per in-game day and `settimespeed 20`, about 7 in-game hours per real second with the tick rate unchanged (measured by `time-chamber`). Scenarios wait for in-game hours, not real seconds. Juveniles are set half a day short of the growth age in the game's own stage table, so the game's clock makes them grow.
@@ -60,14 +60,14 @@ Vanilla builds animals at arbitrary squares when they grow (at the parent's posi
 
 With one water ghost on a vanilla server:
 
-- `NullPointerException: Cannot read field "turnDelta" because "this.adef" is null at IsoAnimal.update`, once per frame: 757 in the first 16 s, then about 10 per second (the incident report: 12,000 in 22 min, about 9.1/s).
+- `NullPointerException: Cannot read field "turnDelta" because "this.adef" is null at IsoAnimal.update`, once per frame: 757 in the first 16 s, then about 10 per second (the report: 12,000 in 22 min, about 9.1/s).
 - The server's Lua `OnTick` heartbeat stopped immediately.
 - The connected player's server-side hunger and thirst stopped changing (0.0403 / 0.0343, unchanged over 10 s).
 - After teleporting 3,500 squares away, the client had the new squares, but none of the 460 animals standing there were sent to it.
 - The errors continued with no player anywhere near the ghost: it stays in the server's global update list.
 - The console kept working.
 
-This matches the report's "no players can take any actions… endurance and thirst/hunger stop changing… no timed actions work… everything is in limbo", and "even where no one is". It also means the players who notice can be far from the ghost.
+This matches the reported symptoms: no player can act, timed actions stop, endurance, hunger and thirst stop changing, and it happens even where nobody is. It also means the players who notice can be far from the ghost.
 
 ### It spreads when an animal grows beside it
 
@@ -118,7 +118,7 @@ The vanilla chunk counts were the same in an earlier run. The control's player d
 | Loading a loose animal whose mod was removed | No ghost; the animal does not load | `removed-type` |
 | Dropping a carried animal on foot at the water's edge | No ghost: water squares are never a drop target | `drop-on-water` |
 | A pasture built over water, fenced or not | No ghost | `pasture-pond`, `pasture-pond-unfenced` |
-| Logging in next to a trailer, carrying or butchering chickens, visiting Ovo Farms, trailer egg compartment, dead animals from a trailer | No ghost | [clue by clue](#the-incident-clue-by-clue) |
+| Logging in next to a trailer, carrying or butchering chickens, visiting Ovo Farms, trailer egg compartment, dead animals from a trailer | No ghost | [suspected causes](#reported-symptoms-and-suspected-causes) |
 
 On an unmodded server the only first causes reproduced through ordinary play are at water. Others have not been ruled out. A ghost on dry land is possible: growth beside one leaves the new ghost where the juvenile stood.
 
@@ -128,7 +128,7 @@ On an unmodded server the only first causes reproduced through ordinary play are
 
 `BaseVehicle.removeAnimalFromTrailer` builds the animal anew (`new IsoAnimal(...)`) at the centre of the trailer's `AnimalEntry` area, about one and a half tiles behind it, then copies the old animal into it; `ISRemoveAnimalFromTrailer` adds it to the world. When that spot is a water square, the constructor stops early and the copy restores the ID and data but not the type. Two hens unloaded from a trailer backed up to Fallas Lake came out with `type=nil`; the world update stopped at once (424 `turnDelta` errors, Lua ticks dead, player stats frozen).
 
-This is the most concrete candidate for the incident's first ghost, because the report ties the failure to a player with a trailer full of chickens. It is not proven to be the one on that server.
+This is one of the two candidates for a first ghost through ordinary play; the other is the next section. Neither is proven to be what started a failure on a real server.
 
 ### Dropping a carried animal from a vehicle seat over water
 
@@ -204,7 +204,7 @@ A common suggestion is to stop the server and delete the `apop` files. In both r
 
 The ghost exists only in the running server's memory and cannot be saved, so stopping the server removes it either way. Deleting the files removes the stored animals as well, and they do not come back, because the record that those zones have already spawned is kept in another file (`map_animals.bin`). Deleting them while the server runs changes nothing about the ghost, and the server writes them again.
 
-That is also why the incident server's 20-hour rollback worked: it was a restart, on a save from before the ghost. Any restart clears the ghost but loses what failed to save. The failure comes back when whatever made the ghost happens again.
+That is also why rolling a server back to an older save works: it is a restart, on a save from before the ghost. Any restart clears the ghost but loses what failed to save. The failure comes back when whatever made the ghost happens again.
 
 ## Animals lost without an error
 
@@ -244,7 +244,7 @@ When the player left the pasture over water for three in-game days and came back
 
 ### Nothing ages faster in an empty chunk
 
-*Code; measured: `aging-rates`. The report's "animals age 10x faster in a chunk no one is in" is refuted as stated.*
+*Code; measured: `aging-rates`. The claim that animals age 10x faster in a chunk nobody is in is refuted as stated.*
 
 Aging speed is the sandbox option `AnimalAgeModifier`, applied the same way to loaded and unloaded animals (`AnimalData.getAgeGrowModifier`): Ultra Fast 90×, Very Fast **10×**, Fast 5×, Normal 1×. Slow and Very Slow are also 1×: they are not implemented. The default presets use Normal (Apocalypse, Survivor, Builder) or Fast (Outbreak). A server on "Very Fast" ages every animal 10×, everywhere.
 
@@ -284,7 +284,7 @@ Chicks past their growth age stay chicks while inside (`IsoHutch.updateAnimalIns
 - **Carried animals do not age.** A chick carried for 65 in-game hours stayed at 125 days (its hours survived moved by 4), so it never reached its growth age.
 - **A carried animal grows only if it is already past its growth age** (set by the lab in `inventory-growth`). `AnimalData.grow` then builds the next stage at the coordinates the animal carries (where it was last on the ground or in a hutch), removes the item and adds the grown animal to the world there, not next to the player.
 - **After a relog, a carried animal is inert.** It keeps its stored coordinates but loses its container link (`getContainer()` is null) and does not grow even when set past its growth age. With a null container, `grow` would delete the old animal without removing its item, but carried animals are not updated after a relog, so the lab could not reach that path.
-- **Egg-compartment chicks are frozen in time.** `Food.checkEggHatch` builds a chick hatching in a trailer container at the trailer's square, then removes it from the world and wraps it in an Animal item in that container. Like a carried animal it neither ages nor gets hungry or thirsty, loaded or not, which explains live chicks in a trailer abandoned long enough for the hens to die. Taking them out does not kill them: no catch-up runs when they enter the world.
+- **Egg-compartment chicks are frozen in time.** `Food.checkEggHatch` builds a chick hatching in a trailer container at the trailer's square, then removes it from the world and wraps it in an Animal item in that container. Like a carried animal it neither ages nor gets hungry or thirsty, loaded or not, so a trailer left long enough for its hens to die can still hold live chicks. Taking them out does not kill them: no catch-up runs when they enter the world.
 
 ### Zombies
 
@@ -292,31 +292,33 @@ Chicks past their growth age stay chicks while inside (`IsoHutch.updateAnimalIns
 
 The dedicated server does not update zombies, so a zombie cannot stop its world update the way a ghost does, and there is nothing server-side for Splint to guard. `MovingObjectUpdateScheduler.startFrame` takes every `IsoZombie` aside when `GameServer.server` is set: it only adds it to its target player's chasing count (and calls `updateForServerGui` when the server runs with its GUI), without adding it to an update bucket. Connected clients simulate zombies; the server relays them. In the lab a zombie in the server's update list received no `OnZombieUpdate` events, and clearing its legs sprite, which `IsoZombie.updateInternal` dereferences, threw nothing, on vanilla and with Splint. Neither the incident report nor the reports it cites involve zombies.
 
-## The incident, clue by clue
+## Reported symptoms and suspected causes
 
-### From the report
+### Symptoms
 
-| Clue | What was found |
+| Symptom or claim | What was found |
 |---|---|
-| "Everything is in limbo", "even where no one is" | [One ghost stops the world for everyone](#one-ghost-stops-the-world-for-everyone) |
+| Everything stops, even where nobody is | [One ghost stops the world for everyone](#one-ghost-stops-the-world-for-everyone) |
 | `textureSkinned` stack | [It spreads when an animal grows beside it](#it-spreads-when-an-animal-grows-beside-it) |
 | `getAttachedTree` errors | [Its map area never unloads](#its-map-area-never-unloads) |
 | Animal IDs are not unique | True, but a [different, silent bug](#animals-lost-without-an-error) |
 | Animals age 10x in empty chunks | [Refuted as stated](#nothing-ages-faster-in-an-empty-chunk) |
-| The 20-hour rollback helped | [It was a restart on a save from before the ghost](#a-restart-clears-the-ghost-wiping-apop-only-deletes-animals) |
+| Rolling back to an older save helps | [It was a restart on a save from before the ghost](#a-restart-clears-the-ghost-wiping-apop-only-deletes-animals) |
 
-The following clues produced no ghost, no exception and no stopped world update, on vanilla or with Splint:
+### Suspected causes
 
-| Clue | Scenario | Result |
+These produced no ghost, no exception and no stopped world update, on vanilla or with Splint:
+
+| Suspected cause | Scenario | Result |
 |---|---|---|
-| A player logs back in next to a trailer full of chickens | `trailer-relog` | All 8 animals intact after save and relog; the chicks grow in the trailer later |
-| "I butchered some chickens before I logged" | `weapon-kill-butcher` | One hen killed with a weapon from each weapon category the game defines (9, read from the item scripts: ranged, axe, blunt, improvised, long blade, small blade, small blunt, spear, unarmed), 8 carcasses butchered the game's way (626 items), one carried; save, relog and two in-game days are clean |
-| "Possibly a ghost chicken in my pocket" (carcasses) | `carcass-relog` | Three carried chicken carcasses survive save, relog and two in-game days |
-| "Loading OvO Farms and leaving it" | `ovo-farms` | Ovo Farms (1245 Payne Road, Echo Creek, three chicken ranch zones around 3960,10805) visited, left for 2.5 in-game days twice, chicks growing while it is unloaded: no errors, no ghosts. Animals of a reloaded farm come back from the population worker some time after the area loads, so a count right after arriving can be short; Splint's run found all 7 IDs again on the next visit |
+| Logging back in next to a livestock trailer with animals in it | `trailer-relog` | All 8 animals intact after save and relog; the chicks grow in the trailer later |
+| Killing and butchering animals, then logging out | `weapon-kill-butcher` | One hen killed with a weapon from each weapon category the game defines (9, read from the item scripts: ranged, axe, blunt, improvised, long blade, small blade, small blunt, spear, unarmed), 8 carcasses butchered the game's way (626 items), one carried; save, relog and two in-game days are clean |
+| Carrying carcasses through a relog | `carcass-relog` | Three carried chicken carcasses survive save, relog and two in-game days |
+| Loading a large farm (Ovo Farms) and leaving it | `ovo-farms` | Ovo Farms (1245 Payne Road, Echo Creek, three chicken ranch zones around 3960,10805) visited, left for 2.5 in-game days twice, chicks growing while it is unloaded: no errors, no ghosts. Animals of a reloaded farm come back from the population worker some time after the area loads, so a count right after arriving can be short; Splint's run found all 7 IDs again on the next visit |
 
-### From the player at the centre of it
+### Trailers, drops and farms over water
 
-The player whose farm was at the centre of the incident described it later: an abandoned livestock trailer with about six dead hens and six chicks; chicks that "hatched into the egg compartment"; one chick that "said it was alive, but it plopped onto the ground dead"; one that gave "a blood animation without any body to butcher"; the rest carried in the pocket and dropped at a farm built over water, which the server lost track of. Every time they joined before the rollback the server "crashed", and they and one other player were put back on the same spot at every login, across resets. Each step was tested:
+Ways a player handles animals around trailers, vehicles and water, each tested:
 
 | Step | Scenario | Vanilla | Splint |
 |---|---|---|---|
@@ -324,15 +326,15 @@ The player whose farm was at the centre of the incident described it later: an a
 | Drop it from the seat of a car parked at the water, door over water | `drop-on-water` | **Ghost**, world update stopped | Whole chick, no exceptions, world update running |
 | Unload dead, dying and healthy hens and chicks from a trailer on land, grab one and drop it | `trailer-unload-dead` | Dead ones become corpses at the trailer's entry, living ones come out whole; no ghosts, no exceptions | same |
 | Hatch two eggs in the trailer's egg compartment, leave it 5 in-game days loaded and 5 unloaded, take the chicks out to the ground and through the pocket | `trailer-egg-compartment` | Chicks hatch as Animal items in the compartment and stay at age 1, hunger 0, thirst 0 throughout; both come out healthy | same |
-| The farm over water had no fence | `pasture-pond-unfenced` | No animal ever on a water square, no ghosts; the young starve in the catch-up after three days away | not run |
+| Keep animals on an unfenced farm over water | `pasture-pond-unfenced` | No animal ever on a water square, no ghosts; the young starve in the catch-up after three days away | not run |
 
-What that explains:
+Symptoms these and the other scenarios explain, or do not:
 
-- **"The second I joined the errors stopped. Then when I left, the errors exploded"** is reproduced by [`presence-cycle`](#its-map-area-never-unloads). The errors depend on whether anyone is near the ghost, not on which player it is. The server crash on leaving is not reproduced.
-- **The server got slower and slower until its reset.** The map cells that pile up (9 to 50 over a short trip) are a steady memory cost that only a player returning to the ghost, or a restart, clears. That fits, but tick rate did not fall in the lab with one player, so the slowdown itself is not reproduced.
-- **Repeat "crashes" and being put back on the same spot** are partly explained. A ghost in the update list stops the world update, and the server then stops moving its copy of the players, so the position it saves is where they stood. A ghost that is only on its square leaves holes in the server's map around it, and a player in a hole is frozen on the server while others are not, which fits "everyone was stuck in our chunk, just me and one other person". Being put back at login was not measured, and what brought the ghost back after each restart is not known.
-- **Losing every live chicken but keeping one corpse** fits failed saves: live animals are written by the population save that the ghost breaks, while corpses are saved with the map chunk.
-- **Not reproduced:** the chick that came out dead and the death with no body. One lab trailer that the world never took in (a debug spawn on one spot near the lab's spawn point; the scenario now checks for this) put unloaded animals at its bare script offset near 0,0 with no square, and dead ones' corpses nowhere, which looks like both; but a trailer a player stands next to is always in the world, so that is a lab artifact, not an explanation.
+- **Errors that stop when a player arrives and flood back when they leave** are reproduced by [`presence-cycle`](#its-map-area-never-unloads). The errors depend on whether anyone is near the ghost, not on which player it is. A server crash on leaving is not reproduced.
+- **A server that gets slower until it is restarted.** The map cells that pile up (9 to 50 over a short trip) are a steady memory cost that only a player returning to the ghost, or a restart, clears. That fits, but tick rate did not fall in the lab with one player, so the slowdown itself is not reproduced.
+- **Being put back on the same spot at login** is partly explained. A ghost in the update list stops the world update, and the server then stops moving its copy of the players, so the position it saves is where they stood. A ghost that is only on its square leaves holes in the server's map around it, and a player in a hole is frozen on the server while others are not. Being put back at login was not measured, and what brought the ghost back after each restart is not known.
+- **Losing live animals but keeping corpses** fits failed saves: live animals are written by the population save that the ghost breaks, while corpses are saved with the map chunk.
+- **Not reproduced:** a live animal coming out of a trailer dead, and a death that leaves no body. One lab trailer that the world never took in (a debug spawn on one spot near the lab's spawn point; the scenario now checks for this) put unloaded animals at its bare script offset near 0,0 with no square, and dead ones' corpses nowhere, which looks like both; but a trailer a player stands next to is always in the world, so that is a lab artifact, not an explanation.
 
 ## What Splint does about each
 
@@ -398,6 +400,6 @@ Splint adds no measurable cost. Its means were lower in all four rows, but the r
 
 ## Still open
 
-- **Which source made the incident server's first ghost.** A trailer unloaded, or a carried animal dropped from a vehicle seat, over water fit the report and the player's account best. With Splint installed, every removed ghost is logged with its place, coordinates, map cell and nearby players, and `/splint problems` lists them, so a recurrence would name it.
-- **What brought the failure back at each login before the rollback,** when a ghost is never saved, and what the server crash was. The console log of the recurrence would show which errors came first.
-- **How the original `getAttachedTree` reports relate in time to the `textureSkinned` ones** on that server; both come from the same ghosts in the lab.
+- **Which source makes the first ghost on a real server.** A trailer unloaded, or a carried animal dropped from a vehicle seat, over water are the only ones reproduced through ordinary play. With Splint installed, every removed ghost is logged with its place, coordinates, map cell and nearby players, and `/splint problems` lists them, so a recurrence would name it.
+- **What can bring the failure back after a restart,** when a ghost is never saved, and whether it can crash a server. The console log of a recurrence would show which errors came first.
+- **How the reported `getAttachedTree` errors relate in time to the `textureSkinned` ones**; both come from the same ghosts in the lab.
