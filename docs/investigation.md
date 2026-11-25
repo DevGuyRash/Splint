@@ -180,7 +180,7 @@ Loading an empty file logs `newLimit < 0: (-1 < 0)` from `AnimalCell.load` and c
 
 A ghost is not the only animal that breaks a save. `IsoAnimal.save` writes the breed's name, so a complete animal that has lost its breed throws too. No vanilla path that produces one was found (the lab removes the breed on purpose, as a faulty mod could), but where such an animal is decides what is lost with it:
 
-| The damaged animal is | Vanilla | Splint 0.4.0 | After the fix |
+| The damaged animal is | Vanilla | Splint 0.4.0 | Splint 0.4.1 |
 |---|---|---|---|
 | on the ground | Shutdown save dies; `apop` file emptied; 9 of 9 hens gone after the restart | same | Save finishes; all 9 there |
 | in a hutch | Save finishes, but the hutch's whole map chunk is not written and keeps its older copy | same | No error; all 3 chicks there |
@@ -188,7 +188,7 @@ A ghost is not the only animal that breaks a save. `IsoAnimal.save` writes the b
 | in a pocket | Shutdown save dies while writing the player, before the loose animals | same | Save finishes; all 3 chicks there |
 | on the ground, with no descriptor (damage Splint does not repair) | Shutdown save dies; `apop` file emptied; 9 of 9 hens gone after the restart | not run | Save finishes; the other 8 of 9 there, the damaged one logged and left out |
 
-Splint 0.4.0 dropped only ghosts at this point, so its claim that one bad animal could no longer abort a save was too broad. See [What Splint does](#what-splint-does-about-each) for the fix and its limit.
+Splint 0.4.0 dropped only ghosts at this point, so its claim that one bad animal could no longer abort a save was too broad. 0.4.1 fixes it; see [What Splint does](#what-splint-does-about-each) for how and for its limit.
 
 ### A restart clears the ghost; wiping apop only deletes animals
 
